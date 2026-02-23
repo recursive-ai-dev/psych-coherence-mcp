@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "psychological_coherence": {
+      "command": "python",
+      "args": ["/path/to/psychological_coherence_mcp/server.py"],
+      "env": {}
+    }
+  }
+}
