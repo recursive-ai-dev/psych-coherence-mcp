@@ -20,14 +20,36 @@ import re
 import uuid
 import logging
 import sys
+import asyncio
 from collections import deque, defaultdict
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
-from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+try:
+    from mcp.server.fastmcp import FastMCP
+    MCP_IMPORT_ERROR: Optional[ModuleNotFoundError] = None
+except ModuleNotFoundError as exc:
+    MCP_IMPORT_ERROR = exc
+
+    class FastMCP:
+        """Minimal fallback to allow import-time usage in environments without mcp."""
+
+        def __init__(self, name: str):
+            self.name = name
+
+        def tool(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+        def run(self):
+            raise RuntimeError(
+                "The 'mcp' package is not installed. Install it to run the MCP server transport."
+            )
 
 # ─────────────────────────────────────────────────────────────────────
 # Logging — stderr only (stdio transport uses stdout for protocol)
@@ -38,6 +60,10 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 logger = logging.getLogger("psychological_coherence_mcp")
+if MCP_IMPORT_ERROR is not None:
+    logger.warning(
+        "Optional dependency 'mcp' not installed; running in degraded mode for local tooling/tests."
+    )
 
 # ─────────────────────────────────────────────────────────────────────
 # Constants & Lexicons
@@ -222,6 +248,7 @@ DISFLUENCY_PATTERNS = {
     "repair_prefix": ["I mean", "or rather", "that is", "actually", "well no"],
     "false_start_connectors": ["—", "—", "actually,", "wait,"],
 }
+VALID_MEMORY_TYPES = {"episodic", "semantic", "procedural", "emotional"}
 
 # ─────────────────────────────────────────────────────────────────────
 # Data Models (Internal State)
@@ -309,7 +336,6 @@ class TopicState:
     topic_keywords: Dict[str, List[str]] = field(default_factory=dict)
 
 
-@dataclass
 class DialoguePhase(Enum):
     OPENING = "opening"
     INFORMATION_GATHERING = "information_gathering"
@@ -488,9 +514,33 @@ class Session:
     entity_registry: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     pronoun_map: Dict[str, str] = field(default_factory=dict)
     response_history: List[Dict[str, Any]] = field(default_factory=list)
+    session_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 SESSIONS: Dict[str, Session] = {}
+SESSIONS_LOCK = asyncio.Lock()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Time Helpers
+# ─────────────────────────────────────────────────────────────────────
+
+def utc_now() -> datetime:
+    """Return timezone-aware current UTC datetime."""
+    return datetime.now(timezone.utc)
+
+
+def iso_utc_now() -> str:
+    """Return current UTC timestamp in ISO 8601 format."""
+    return utc_now().isoformat()
+
+
+def parse_timestamp(timestamp: str) -> datetime:
+    """Parse an ISO 8601 timestamp and normalize naive values to UTC."""
+    parsed = datetime.fromisoformat(timestamp)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -898,8 +948,8 @@ def compute_memory_relevance(query_words: List[str], memory: MemoryEntry) -> flo
 
     # Recency decay (exponential, half-life = 24 hours)
     try:
-        created = datetime.fromisoformat(memory.timestamp)
-        hours_ago = (datetime.now() - created).total_seconds() / 3600.0
+        created = parse_timestamp(memory.timestamp)
+        hours_ago = max((utc_now() - created).total_seconds() / 3600.0, 0.0)
         recency_factor = math.exp(-0.03 * hours_ago)  # ~50% at 24h
     except (ValueError, TypeError):
         recency_factor = 0.5
@@ -933,7 +983,7 @@ def detect_contradiction(session: Session, entity: str, attribute: str, new_valu
                 "new_confidence": confidence,
                 "current_turn": session.turn_count,
                 "turns_apart": session.turn_count - existing.source_turn,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": iso_utc_now(),
             }
             session.contradiction_log.append(contradiction)
             return contradiction
@@ -1038,8 +1088,14 @@ def compute_coherence_score(session: Session) -> Dict[str, float]:
 
     # Memory coherence: ratio of memories that are accessible and recent
     if session.long_term_memories:
-        recent = sum(1 for m in session.long_term_memories
-                     if (datetime.now() - datetime.fromisoformat(m.timestamp)).total_seconds() < 7200)
+        recent = 0
+        for memory in session.long_term_memories:
+            try:
+                age_seconds = (utc_now() - parse_timestamp(memory.timestamp)).total_seconds()
+                if age_seconds < 7200:
+                    recent += 1
+            except (ValueError, TypeError):
+                continue
         scores["memory_coherence"] = round(recent / len(session.long_term_memories), 3)
     else:
         scores["memory_coherence"] = 0.5  # baseline
@@ -1430,6 +1486,15 @@ class StoreMemoryInput(BaseModel):
     importance: float = Field(default=0.5, description="Importance score 0.0-1.0.", ge=0.0, le=1.0)
     tags: Optional[List[str]] = Field(default_factory=list, description="Tags for categorization.", max_length=20)
 
+    @field_validator("memory_type")
+    @classmethod
+    def validate_memory_type(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in VALID_MEMORY_TYPES:
+            allowed = ", ".join(sorted(VALID_MEMORY_TYPES))
+            raise ValueError(f"Invalid memory_type '{value}'. Allowed: {allowed}")
+        return normalized
+
 
 class RecallInput(BaseModel):
     """Input for recalling relevant memories."""
@@ -1439,6 +1504,17 @@ class RecallInput(BaseModel):
     query: str = Field(..., description="What to search for in memory.", min_length=1, max_length=1000)
     max_results: int = Field(default=5, description="Maximum results to return.", ge=1, le=20)
     memory_type: Optional[str] = Field(default=None, description="Filter by memory type.")
+
+    @field_validator("memory_type")
+    @classmethod
+    def validate_memory_type_filter(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        normalized = value.lower()
+        if normalized not in VALID_MEMORY_TYPES:
+            allowed = ", ".join(sorted(VALID_MEMORY_TYPES))
+            raise ValueError(f"Invalid memory_type '{value}'. Allowed: {allowed}")
+        return normalized
 
 
 class StoreBeliefInput(BaseModel):
@@ -1479,10 +1555,12 @@ class SessionIdInput(BaseModel):
 
 # ── Helper: get session or error ──
 
-def _get_session(session_id: str) -> Session:
-    if session_id not in SESSIONS:
+async def _get_session(session_id: str) -> Session:
+    async with SESSIONS_LOCK:
+        session = SESSIONS.get(session_id)
+    if session is None:
         raise ValueError(f"Session '{session_id}' not found. Create one first with psy_create_session.")
-    return SESSIONS[session_id]
+    return session
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1569,16 +1647,15 @@ async def psy_create_session(params: CreateSessionInput) -> str:
         str: JSON with session_id, persona info, and confirmation.
     """
     sid = params.session_id or str(uuid.uuid4())[:12]
-
-    if sid in SESSIONS:
-        return json.dumps({"error": f"Session '{sid}' already exists. Use a different ID or end the existing session."})
-
-    session = Session(
-        session_id=sid,
-        persona_id=params.persona_id,
-        created_at=datetime.now().isoformat(),
-    )
-    SESSIONS[sid] = session
+    async with SESSIONS_LOCK:
+        if sid in SESSIONS:
+            return json.dumps({"error": f"Session '{sid}' already exists. Use a different ID or end the existing session."})
+        session = Session(
+            session_id=sid,
+            persona_id=params.persona_id,
+            created_at=iso_utc_now(),
+        )
+        SESSIONS[sid] = session
 
     persona = PERSONAS[params.persona_id]
     return json.dumps({
@@ -1597,7 +1674,7 @@ async def psy_create_session(params: CreateSessionInput) -> str:
 
 @mcp.tool(
     name="psy_analyze_input",
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
 )
 async def psy_analyze_input(params: AnalyzeInputModel) -> str:
     """Perform comprehensive psychological analysis on user text.
@@ -1618,17 +1695,18 @@ async def psy_analyze_input(params: AnalyzeInputModel) -> str:
     # If session provided, update running profile
     if params.session_id:
         try:
-            session = _get_session(params.session_id)
-            new_profile = PersonalityProfile(**{k: v for k, v in result["personality_profile"].items()})
+            session = await _get_session(params.session_id)
+            async with session.session_lock:
+                new_profile = PersonalityProfile(**{k: v for k, v in result["personality_profile"].items()})
 
-            # Blend with existing (new data gets lower weight as more data accumulates)
-            weight = max(0.15, 1.0 / (1.0 + session.turn_count * 0.3))
-            session.user_profile = blend_profiles(session.user_profile, new_profile, weight)
-            session.user_profile_history.append(PersonalityProfile(**asdict(session.user_profile)))
+                # Blend with existing (new data gets lower weight as more data accumulates)
+                weight = max(0.15, 1.0 / (1.0 + session.turn_count * 0.3))
+                session.user_profile = blend_profiles(session.user_profile, new_profile, weight)
+                session.user_profile_history.append(PersonalityProfile(**asdict(session.user_profile)))
 
-            result["session_profile_updated"] = True
-            result["blended_user_profile"] = session.user_profile.to_dict()
-            result["blend_weight_used"] = round(weight, 3)
+                result["session_profile_updated"] = True
+                result["blended_user_profile"] = session.user_profile.to_dict()
+                result["blend_weight_used"] = round(weight, 3)
         except ValueError as e:
             result["session_error"] = str(e)
 
@@ -1665,93 +1743,94 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
     Returns:
         str: JSON generation brief with all constraints and context for the LLM.
     """
-    session = _get_session(params.session_id)
-    persona = PERSONAS[session.persona_id]
-    session.turn_count += 1
+    session = await _get_session(params.session_id)
+    async with session.session_lock:
+        persona = PERSONAS[session.persona_id]
+        session.turn_count += 1
 
-    # Step 1: Analyze user input
-    analysis = full_analysis(params.user_text)
+        # Step 1: Analyze user input
+        analysis = full_analysis(params.user_text)
 
-    # Step 2: Update running user profile
-    new_profile = PersonalityProfile(**{k: v for k, v in analysis["personality_profile"].items()})
-    weight = max(0.15, 1.0 / (1.0 + session.turn_count * 0.3))
-    session.user_profile = blend_profiles(session.user_profile, new_profile, weight)
-    session.user_profile_history.append(PersonalityProfile(**asdict(session.user_profile)))
+        # Step 2: Update running user profile
+        new_profile = PersonalityProfile(**{k: v for k, v in analysis["personality_profile"].items()})
+        weight = max(0.15, 1.0 / (1.0 + session.turn_count * 0.3))
+        session.user_profile = blend_profiles(session.user_profile, new_profile, weight)
+        session.user_profile_history.append(PersonalityProfile(**asdict(session.user_profile)))
 
-    # Step 3: Update topic tracking
-    topic_transition = update_topic_state(session, analysis.get("topics", []))
+        # Step 3: Update topic tracking
+        topic_transition = update_topic_state(session, analysis.get("topics", []))
 
-    # Step 4: Update dialogue phase
-    dialogue_phase = update_dialogue_phase(session, analysis, params.user_text)
+        # Step 4: Update dialogue phase
+        dialogue_phase = update_dialogue_phase(session, analysis, params.user_text)
 
-    # Step 5: Store in short-term memory
-    session.short_term_memory.append({
-        "turn": session.turn_count,
-        "role": "user",
-        "text": params.user_text[:500],
-        "primary_emotion": analysis["mood_state"]["primary_emotion"],
-        "topics": analysis.get("topics", [])[:3],
-        "timestamp": datetime.now().isoformat(),
-    })
+        # Step 5: Store in short-term memory
+        session.short_term_memory.append({
+            "turn": session.turn_count,
+            "role": "user",
+            "text": params.user_text[:500],
+            "primary_emotion": analysis["mood_state"]["primary_emotion"],
+            "topics": analysis.get("topics", [])[:3],
+            "timestamp": iso_utc_now(),
+        })
 
-    # Step 6: Recall relevant long-term memories
-    query_words = tokenize(params.user_text)
-    relevant_memories = []
-    for mem in session.long_term_memories:
-        relevance = compute_memory_relevance(query_words, mem)
-        if relevance > 0.1:
-            mem.access_count += 1
-            relevant_memories.append({
-                "content": mem.content,
-                "type": mem.memory_type,
-                "importance": mem.importance,
-                "relevance_score": relevance,
-                "tags": mem.tags,
-            })
-    relevant_memories.sort(key=lambda x: x["relevance_score"], reverse=True)
-    relevant_memories = relevant_memories[:5]
+        # Step 6: Recall relevant long-term memories
+        query_words = tokenize(params.user_text)
+        relevant_memories = []
+        for mem in session.long_term_memories:
+            relevance = compute_memory_relevance(query_words, mem)
+            if relevance > 0.1:
+                mem.access_count += 1
+                relevant_memories.append({
+                    "content": mem.content,
+                    "type": mem.memory_type,
+                    "importance": mem.importance,
+                    "relevance_score": relevance,
+                    "tags": mem.tags,
+                })
+        relevant_memories.sort(key=lambda x: x["relevance_score"], reverse=True)
+        relevant_memories = relevant_memories[:5]
 
-    # Step 7: Build generation constraints
-    constraints = build_generation_constraints(analysis, persona, session)
+        # Step 7: Build generation constraints
+        constraints = build_generation_constraints(analysis, persona, session)
 
-    # Step 8: Compute coherence
-    coherence = compute_coherence_score(session)
+        # Step 8: Compute coherence
+        coherence = compute_coherence_score(session)
 
-    # Step 9: Build recent conversation context
-    recent_turns = list(session.short_term_memory)[-6:]
+        # Step 9: Build recent conversation context
+        recent_turns = list(session.short_term_memory)[-6:]
 
-    # Assemble the generation brief
-    brief = {
-        "session_id": session.session_id,
-        "turn_number": session.turn_count,
-        "user_input": params.user_text,
-        "psychological_analysis": analysis,
-        "blended_user_profile": session.user_profile.to_dict(),
-        "generation_constraints": constraints,
-        "topic_transition": topic_transition,
-        "dialogue_phase": dialogue_phase,
-        "relevant_memories": relevant_memories,
-        "recent_conversation": recent_turns,
-        "coherence_scores": coherence,
-        "humanization_config": {
-            "enabled": params.enable_humanization,
-            "disfluency_level": params.disfluency_level,
-            "persona_voice_markers": persona.get("voice_markers", {}),
-        },
-        "active_contradictions": session.contradiction_log[-3:] if session.contradiction_log else [],
-    }
+        # Assemble the generation brief
+        brief = {
+            "session_id": session.session_id,
+            "turn_number": session.turn_count,
+            "user_input": params.user_text,
+            "psychological_analysis": analysis,
+            "blended_user_profile": session.user_profile.to_dict(),
+            "generation_constraints": constraints,
+            "topic_transition": topic_transition,
+            "dialogue_phase": dialogue_phase,
+            "relevant_memories": relevant_memories,
+            "recent_conversation": recent_turns,
+            "coherence_scores": coherence,
+            "humanization_config": {
+                "enabled": params.enable_humanization,
+                "disfluency_level": params.disfluency_level,
+                "persona_voice_markers": persona.get("voice_markers", {}),
+            },
+            "active_contradictions": session.contradiction_log[-3:] if session.contradiction_log else [],
+        }
 
-    # Record this response generation
-    session.response_history.append({
-        "turn": session.turn_count,
-        "user_text": params.user_text[:200],
-        "phase": dialogue_phase,
-        "primary_emotion": analysis["mood_state"]["primary_emotion"],
-        "coherence": coherence["overall"],
-        "timestamp": datetime.now().isoformat(),
-    })
+        # Record this response generation
+        session.response_history.append({
+            "turn": session.turn_count,
+            "user_text": params.user_text[:200],
+            "phase": dialogue_phase,
+            "primary_emotion": analysis["mood_state"]["primary_emotion"],
+            "coherence": coherence["overall"],
+            "timestamp": iso_utc_now(),
+        })
 
-    return json.dumps(brief, indent=2, default=str)
+        return json.dumps(brief, indent=2, default=str)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1777,28 +1856,28 @@ async def psy_store_memory(params: StoreMemoryInput) -> str:
     Returns:
         str: JSON confirmation with memory ID and metadata.
     """
-    session = _get_session(params.session_id)
+    session = await _get_session(params.session_id)
+    async with session.session_lock:
+        entry = MemoryEntry(
+            id=str(uuid.uuid4())[:8],
+            content={"text": params.content},
+            memory_type=params.memory_type,
+            timestamp=iso_utc_now(),
+            importance=params.importance,
+            tags=params.tags or [],
+            associations=extract_topics(params.content)[:4],
+        )
+        session.long_term_memories.append(entry)
 
-    entry = MemoryEntry(
-        id=str(uuid.uuid4())[:8],
-        content={"text": params.content},
-        memory_type=params.memory_type,
-        timestamp=datetime.now().isoformat(),
-        importance=params.importance,
-        tags=params.tags or [],
-        associations=extract_topics(params.content)[:4],
-    )
-    session.long_term_memories.append(entry)
-
-    return json.dumps({
-        "memory_id": entry.id,
-        "memory_type": entry.memory_type,
-        "importance": entry.importance,
-        "tags": entry.tags,
-        "associations": entry.associations,
-        "total_memories": len(session.long_term_memories),
-        "status": "stored",
-    }, indent=2)
+        return json.dumps({
+            "memory_id": entry.id,
+            "memory_type": entry.memory_type,
+            "importance": entry.importance,
+            "tags": entry.tags,
+            "associations": entry.associations,
+            "total_memories": len(session.long_term_memories),
+            "status": "stored",
+        }, indent=2)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1807,7 +1886,7 @@ async def psy_store_memory(params: StoreMemoryInput) -> str:
 
 @mcp.tool(
     name="psy_recall",
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
 )
 async def psy_recall(params: RecallInput) -> str:
     """Recall relevant memories from the session's long-term memory.
@@ -1821,36 +1900,37 @@ async def psy_recall(params: RecallInput) -> str:
     Returns:
         str: JSON array of relevant memories ranked by relevance.
     """
-    session = _get_session(params.session_id)
-    query_words = tokenize(params.query)
+    session = await _get_session(params.session_id)
+    async with session.session_lock:
+        query_words = tokenize(params.query)
 
-    candidates = session.long_term_memories
-    if params.memory_type:
-        candidates = [m for m in candidates if m.memory_type == params.memory_type]
+        candidates = session.long_term_memories
+        if params.memory_type:
+            candidates = [m for m in candidates if m.memory_type == params.memory_type]
 
-    scored = []
-    for mem in candidates:
-        relevance = compute_memory_relevance(query_words, mem)
-        if relevance > 0.05:
-            mem.access_count += 1
-            scored.append({
-                "memory_id": mem.id,
-                "content": mem.content,
-                "memory_type": mem.memory_type,
-                "importance": mem.importance,
-                "relevance_score": relevance,
-                "tags": mem.tags,
-                "timestamp": mem.timestamp,
-                "access_count": mem.access_count,
-            })
+        scored = []
+        for mem in candidates:
+            relevance = compute_memory_relevance(query_words, mem)
+            if relevance > 0.05:
+                mem.access_count += 1
+                scored.append({
+                    "memory_id": mem.id,
+                    "content": mem.content,
+                    "memory_type": mem.memory_type,
+                    "importance": mem.importance,
+                    "relevance_score": relevance,
+                    "tags": mem.tags,
+                    "timestamp": mem.timestamp,
+                    "access_count": mem.access_count,
+                })
 
-    scored.sort(key=lambda x: x["relevance_score"], reverse=True)
-    return json.dumps({
-        "query": params.query,
-        "results": scored[:params.max_results],
-        "total_searched": len(candidates),
-        "total_matched": len(scored),
-    }, indent=2)
+        scored.sort(key=lambda x: x["relevance_score"], reverse=True)
+        return json.dumps({
+            "query": params.query,
+            "results": scored[:params.max_results],
+            "total_searched": len(candidates),
+            "total_matched": len(scored),
+        }, indent=2)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1874,45 +1954,45 @@ async def psy_store_belief(params: StoreBeliefInput) -> str:
     Returns:
         str: JSON with stored belief details and any contradiction detected.
     """
-    session = _get_session(params.session_id)
+    session = await _get_session(params.session_id)
+    async with session.session_lock:
+        # Check for contradiction
+        contradiction = detect_contradiction(
+            session, params.entity, params.attribute, params.value, params.confidence
+        )
 
-    # Check for contradiction
-    contradiction = detect_contradiction(
-        session, params.entity, params.attribute, params.value, params.confidence
-    )
+        # Store the belief (update or create)
+        entry = BeliefEntry(
+            entity=params.entity,
+            attribute=params.attribute,
+            value=params.value,
+            confidence=params.confidence,
+            timestamp=iso_utc_now(),
+            source_turn=session.turn_count,
+        )
+        session.belief_graph[params.entity][params.attribute] = entry
 
-    # Store the belief (update or create)
-    entry = BeliefEntry(
-        entity=params.entity,
-        attribute=params.attribute,
-        value=params.value,
-        confidence=params.confidence,
-        timestamp=datetime.now().isoformat(),
-        source_turn=session.turn_count,
-    )
-    session.belief_graph[params.entity][params.attribute] = entry
+        result: Dict[str, Any] = {
+            "entity": params.entity,
+            "attribute": params.attribute,
+            "value": params.value,
+            "confidence": params.confidence,
+            "status": "stored",
+        }
 
-    result: Dict[str, Any] = {
-        "entity": params.entity,
-        "attribute": params.attribute,
-        "value": params.value,
-        "confidence": params.confidence,
-        "status": "stored",
-    }
+        if contradiction:
+            result["contradiction_detected"] = True
+            result["contradiction"] = contradiction
+            result["resolution_strategies"] = [
+                "recency_bias: Trust the newer information (current approach — the belief was updated).",
+                "confidence_weighted: Compare confidence scores to decide which to trust.",
+                "acknowledge_change: Explicitly note the change in conversation.",
+                "persona_consistent: Choose the value that aligns with the persona's worldview.",
+            ]
+        else:
+            result["contradiction_detected"] = False
 
-    if contradiction:
-        result["contradiction_detected"] = True
-        result["contradiction"] = contradiction
-        result["resolution_strategies"] = [
-            "recency_bias: Trust the newer information (current approach — the belief was updated).",
-            "confidence_weighted: Compare confidence scores to decide which to trust.",
-            "acknowledge_change: Explicitly note the change in conversation.",
-            "persona_consistent: Choose the value that aligns with the persona's worldview.",
-        ]
-    else:
-        result["contradiction_detected"] = False
-
-    return json.dumps(result, indent=2, default=str)
+        return json.dumps(result, indent=2, default=str)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1936,34 +2016,35 @@ async def psy_get_coherence_state(params: SessionIdInput) -> str:
     Returns:
         str: JSON with comprehensive session coherence state.
     """
-    session = _get_session(params.session_id)
-    coherence = compute_coherence_score(session)
+    session = await _get_session(params.session_id)
+    async with session.session_lock:
+        coherence = compute_coherence_score(session)
 
-    return json.dumps({
-        "session_id": session.session_id,
-        "persona_id": session.persona_id,
-        "turn_count": session.turn_count,
-        "dialogue_phase": session.dialogue_phase,
-        "coherence_scores": coherence,
-        "topic_state": {
-            "current_topic": session.topic_state.current_topic,
-            "topic_history": session.topic_state.topic_history[-10:],
-            "transition_type": session.topic_state.transition_type,
-            "topic_confidence": session.topic_state.topic_confidence,
-        },
-        "user_profile": session.user_profile.to_dict(),
-        "memory_stats": {
-            "short_term_entries": len(session.short_term_memory),
-            "long_term_entries": len(session.long_term_memories),
-        },
-        "belief_stats": {
-            "total_entities": len(session.belief_graph),
-            "total_beliefs": sum(len(attrs) for attrs in session.belief_graph.values()),
-            "total_contradictions": len(session.contradiction_log),
-        },
-        "contradiction_log": session.contradiction_log[-5:],
-        "created_at": session.created_at,
-    }, indent=2, default=str)
+        return json.dumps({
+            "session_id": session.session_id,
+            "persona_id": session.persona_id,
+            "turn_count": session.turn_count,
+            "dialogue_phase": session.dialogue_phase,
+            "coherence_scores": coherence,
+            "topic_state": {
+                "current_topic": session.topic_state.current_topic,
+                "topic_history": session.topic_state.topic_history[-10:],
+                "transition_type": session.topic_state.transition_type,
+                "topic_confidence": session.topic_state.topic_confidence,
+            },
+            "user_profile": session.user_profile.to_dict(),
+            "memory_stats": {
+                "short_term_entries": len(session.short_term_memory),
+                "long_term_entries": len(session.long_term_memories),
+            },
+            "belief_stats": {
+                "total_entities": len(session.belief_graph),
+                "total_beliefs": sum(len(attrs) for attrs in session.belief_graph.values()),
+                "total_contradictions": len(session.contradiction_log),
+            },
+            "contradiction_log": session.contradiction_log[-5:],
+            "created_at": session.created_at,
+        }, indent=2, default=str)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -2027,47 +2108,58 @@ async def psy_end_session(params: SessionIdInput) -> str:
     Returns:
         str: JSON session summary with all statistics.
     """
-    session = _get_session(params.session_id)
+    session = await _get_session(params.session_id)
+    async with session.session_lock:
+        # Compute final stats
+        coherence = compute_coherence_score(session)
 
-    # Compute final stats
-    coherence = compute_coherence_score(session)
+        # Emotional trajectory
+        emotional_trajectory = []
+        for entry in session.response_history:
+            emotional_trajectory.append({
+                "turn": entry["turn"],
+                "emotion": entry["primary_emotion"],
+                "phase": entry["phase"],
+            })
 
-    # Emotional trajectory
-    emotional_trajectory = []
-    for entry in session.response_history:
-        emotional_trajectory.append({
-            "turn": entry["turn"],
-            "emotion": entry["primary_emotion"],
-            "phase": entry["phase"],
-        })
+        # Average coherence across responses
+        avg_coherence = 0.0
+        if session.response_history:
+            avg_coherence = round(
+                sum(r.get("coherence", 0) for r in session.response_history) / len(session.response_history), 3
+            )
+        ended_at = utc_now()
+        duration_since_creation: Optional[float] = None
+        try:
+            created_at = parse_timestamp(session.created_at)
+            duration_since_creation = round(max((ended_at - created_at).total_seconds(), 0.0), 3)
+        except (ValueError, TypeError):
+            pass
 
-    # Average coherence across responses
-    avg_coherence = 0.0
-    if session.response_history:
-        avg_coherence = round(
-            sum(r.get("coherence", 0) for r in session.response_history) / len(session.response_history), 3
-        )
-
-    summary = {
-        "session_id": session.session_id,
-        "persona_id": session.persona_id,
-        "persona_name": PERSONAS[session.persona_id]["name"],
-        "total_turns": session.turn_count,
-        "duration_since_creation": session.created_at,
-        "final_coherence": coherence,
-        "average_coherence": avg_coherence,
-        "final_user_profile": session.user_profile.to_dict(),
-        "emotional_trajectory": emotional_trajectory,
-        "topic_coverage": session.topic_state.topic_history,
-        "total_memories_stored": len(session.long_term_memories),
-        "total_beliefs_tracked": sum(len(attrs) for attrs in session.belief_graph.values()),
-        "total_contradictions": len(session.contradiction_log),
-        "contradictions": session.contradiction_log,
-        "status": "ended",
-    }
+        summary = {
+            "session_id": session.session_id,
+            "persona_id": session.persona_id,
+            "persona_name": PERSONAS[session.persona_id]["name"],
+            "total_turns": session.turn_count,
+            "created_at": session.created_at,
+            "ended_at": ended_at.isoformat(),
+            "duration_since_creation": duration_since_creation,
+            "final_coherence": coherence,
+            "average_coherence": avg_coherence,
+            "final_user_profile": session.user_profile.to_dict(),
+            "emotional_trajectory": emotional_trajectory,
+            "topic_coverage": session.topic_state.topic_history,
+            "total_memories_stored": len(session.long_term_memories),
+            "total_beliefs_tracked": sum(len(attrs) for attrs in session.belief_graph.values()),
+            "total_contradictions": len(session.contradiction_log),
+            "contradictions": session.contradiction_log,
+            "status": "ended",
+        }
 
     # Cleanup
-    del SESSIONS[params.session_id]
+    async with SESSIONS_LOCK:
+        if SESSIONS.get(params.session_id) is session:
+            del SESSIONS[params.session_id]
 
     return json.dumps(summary, indent=2, default=str)
 
@@ -2102,20 +2194,21 @@ async def psy_build_constraints(params: BuildConstraintsInput) -> str:
     Returns:
         str: JSON generation constraints with persona voice, tone directives, and more.
     """
-    session = _get_session(params.session_id)
-    persona = PERSONAS[session.persona_id]
-    analysis = full_analysis(params.user_text)
-    constraints = build_generation_constraints(analysis, persona, session)
-    constraints["psychological_analysis_summary"] = {
-        "primary_emotion": analysis["mood_state"]["primary_emotion"],
-        "emotion_intensity": analysis["mood_state"]["emotion_intensity"],
-        "valence": analysis["mood_state"]["valence"],
-        "arousal": analysis["mood_state"]["arousal"],
-        "detected_needs": analysis["mood_state"]["detected_needs"],
-        "formality": analysis["mood_state"]["formality_level"],
-        "directness": analysis["mood_state"]["directness_level"],
-    }
-    return json.dumps(constraints, indent=2, default=str)
+    session = await _get_session(params.session_id)
+    async with session.session_lock:
+        persona = PERSONAS[session.persona_id]
+        analysis = full_analysis(params.user_text)
+        constraints = build_generation_constraints(analysis, persona, session)
+        constraints["psychological_analysis_summary"] = {
+            "primary_emotion": analysis["mood_state"]["primary_emotion"],
+            "emotion_intensity": analysis["mood_state"]["emotion_intensity"],
+            "valence": analysis["mood_state"]["valence"],
+            "arousal": analysis["mood_state"]["arousal"],
+            "detected_needs": analysis["mood_state"]["detected_needs"],
+            "formality": analysis["mood_state"]["formality_level"],
+            "directness": analysis["mood_state"]["directness_level"],
+        }
+        return json.dumps(constraints, indent=2, default=str)
 
 
 # ─────────────────────────────────────────────────────────────────────

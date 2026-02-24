@@ -5,7 +5,11 @@ Exercises every tool and validates output structure and logic.
 import asyncio
 import json
 import sys
-sys.path.insert(0, "/home/claude/psychological_coherence_mcp")
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from server import (
     psy_list_personas, psy_get_persona, psy_create_session,

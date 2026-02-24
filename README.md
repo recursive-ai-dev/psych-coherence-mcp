@@ -51,7 +51,7 @@ Each persona includes Big Five traits, communication style parameters, emotional
 - `pydantic` v2+
 
 ```bash
-pip install mcp pydantic
+pip install -r requirements.txt
 ```
 
 ### Claude Desktop Integration
