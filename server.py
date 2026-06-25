@@ -515,6 +515,8 @@ class Session:
     pronoun_map: Dict[str, str] = field(default_factory=dict)
     response_history: List[Dict[str, Any]] = field(default_factory=list)
     session_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_accessed: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 SESSIONS: Dict[str, Session] = {}
@@ -543,8 +545,9 @@ def parse_timestamp(timestamp: str) -> datetime:
     return parsed
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Core Analysis Engine
+# =====================================================================
+# SECTION: Core Analysis Engine
+# =====================================================================
 # ─────────────────────────────────────────────────────────────────────
 
 def tokenize(text: str) -> List[str]:
@@ -1126,8 +1129,9 @@ def compute_coherence_score(session: Session) -> Dict[str, float]:
     return scores
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Generation Constraint Builder
+# =====================================================================
+# SECTION: Generation Constraint Builder
+# =====================================================================
 # ─────────────────────────────────────────────────────────────────────
 
 def build_generation_constraints(analysis: Dict[str, Any], persona: Dict[str, Any], session: Session) -> Dict[str, Any]:
@@ -1423,8 +1427,9 @@ def humanize_text(text: str, persona: Dict[str, Any],
     }
 
 
-# ─────────────────────────────────────────────────────────────────────
-# MCP Server & Tool Definitions
+# =====================================================================
+# SECTION: MCP Server & Tool Definitions
+# =====================================================================
 # ─────────────────────────────────────────────────────────────────────
 
 mcp = FastMCP("psychological_coherence_mcp")
@@ -1441,7 +1446,7 @@ class CreateSessionInput(BaseModel):
         min_length=1, max_length=100,
     )
     session_id: Optional[str] = Field(
-        default=None, description="Optional custom session ID. Auto-generated if omitted.",
+        default=None, description="Optional custom session ID. Auto-generated if omitted.", min_length=1, max_length=100,
     )
 
     @field_validator("persona_id")
@@ -1467,7 +1472,7 @@ class GenerateResponseInput(BaseModel):
     """Input for the full generation pipeline."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    session_id: str = Field(..., description="Active session ID.", min_length=1)
+    session_id: str = Field(..., description="Active session ID.", min_length=1, max_length=100)
     user_text: str = Field(..., description="The user's input text to respond to.", min_length=1, max_length=10000)
     enable_humanization: bool = Field(default=True, description="Apply disfluencies and persona voice markers.")
     disfluency_level: float = Field(default=0.3, description="Disfluency intensity 0.0-1.0.", ge=0.0, le=1.0)
@@ -1477,7 +1482,7 @@ class StoreMemoryInput(BaseModel):
     """Input for storing a memory entry."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    session_id: str = Field(..., description="Active session ID.", min_length=1)
+    session_id: str = Field(..., description="Active session ID.", min_length=1, max_length=100)
     content: str = Field(..., description="The content to remember (fact, event, emotional moment, etc.).", min_length=1, max_length=5000)
     memory_type: str = Field(
         default="episodic",
@@ -1500,7 +1505,7 @@ class RecallInput(BaseModel):
     """Input for recalling relevant memories."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    session_id: str = Field(..., description="Active session ID.", min_length=1)
+    session_id: str = Field(..., description="Active session ID.", min_length=1, max_length=100)
     query: str = Field(..., description="What to search for in memory.", min_length=1, max_length=1000)
     max_results: int = Field(default=5, description="Maximum results to return.", ge=1, le=20)
     memory_type: Optional[str] = Field(default=None, description="Filter by memory type.")
@@ -1521,7 +1526,7 @@ class StoreBeliefInput(BaseModel):
     """Input for recording a belief/fact about an entity."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    session_id: str = Field(..., description="Active session ID.", min_length=1)
+    session_id: str = Field(..., description="Active session ID.", min_length=1, max_length=100)
     entity: str = Field(..., description="The entity (person, place, concept) the belief is about.", min_length=1, max_length=200)
     attribute: str = Field(..., description="The attribute being stated (e.g., 'favorite_color', 'occupation').", min_length=1, max_length=200)
     value: str = Field(..., description="The stated value.", min_length=1, max_length=1000)
@@ -1550,7 +1555,7 @@ class HumanizeInput(BaseModel):
 class SessionIdInput(BaseModel):
     """Input requiring only a session ID."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
-    session_id: str = Field(..., description="Active session ID.", min_length=1)
+    session_id: str = Field(..., description="Active session ID.", min_length=1, max_length=100)
 
 
 # ── Helper: get session or error ──
@@ -1560,6 +1565,7 @@ async def _get_session(session_id: str) -> Session:
         session = SESSIONS.get(session_id)
     if session is None:
         raise ValueError(f"Session '{session_id}' not found. Create one first with psy_create_session.")
+    session.last_accessed = datetime.now(timezone.utc).isoformat()
     return session
 
 
@@ -1646,26 +1652,31 @@ async def psy_create_session(params: CreateSessionInput) -> str:
     Returns:
         str: JSON with session_id, persona info, and confirmation.
     """
-    sid = params.session_id or str(uuid.uuid4())[:12]
-    async with SESSIONS_LOCK:
-        if sid in SESSIONS:
-            return json.dumps({"error": f"Session '{sid}' already exists. Use a different ID or end the existing session."})
-        session = Session(
-            session_id=sid,
-            persona_id=params.persona_id,
-            created_at=iso_utc_now(),
-        )
-        SESSIONS[sid] = session
+    try:
+        logger.info(f"Creating session with persona {params.persona_id}")
+        sid = params.session_id or str(uuid.uuid4())[:12]
+        async with SESSIONS_LOCK:
+            if sid in SESSIONS:
+                return json.dumps({"error": f"Session '{sid}' already exists. Use a different ID or end the existing session."})
+            session = Session(
+                session_id=sid,
+                persona_id=params.persona_id,
+                created_at=iso_utc_now(),
+            )
+            SESSIONS[sid] = session
 
-    persona = PERSONAS[params.persona_id]
-    return json.dumps({
-        "session_id": sid,
-        "persona": persona["name"],
-        "persona_id": params.persona_id,
-        "description": persona["description"],
-        "status": "active",
-        "message": f"Session created. {persona['name']} is ready.",
-    }, indent=2)
+        persona = PERSONAS[params.persona_id]
+        return json.dumps({
+            "session_id": sid,
+            "persona": persona["name"],
+            "persona_id": params.persona_id,
+            "description": persona["description"],
+            "status": "active",
+            "message": f"Session created. {persona['name']} is ready.",
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error in psy_create_session: {e}", exc_info=True)
+        return json.dumps({"error": str(e), "tool": "psy_create_session"}, indent=2)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1747,6 +1758,7 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
     async with session.session_lock:
         persona = PERSONAS[session.persona_id]
         session.turn_count += 1
+        session.updated_at = datetime.now(timezone.utc).isoformat()
 
         # Step 1: Analyze user input
         analysis = full_analysis(params.user_text)
@@ -2172,7 +2184,7 @@ class BuildConstraintsInput(BaseModel):
     """Input for building generation constraints from analysis."""
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
-    session_id: str = Field(..., description="Active session ID.", min_length=1)
+    session_id: str = Field(..., description="Active session ID.", min_length=1, max_length=100)
     user_text: str = Field(..., description="User text to analyze for constraint building.", min_length=1, max_length=10000)
 
 
