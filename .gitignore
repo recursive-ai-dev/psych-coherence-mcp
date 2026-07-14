@@ -1,1 +1,1 @@
-Nothing needs to be added to .gitignore since only a Python test file (`test_adversarial.py`) was added, which is source code and should not be ignored.
+Nothing needs to be added to .gitignore since only a Python test file (`test_adversarial.py`) was added, which is source code and should not be ignored.__pycache__/
