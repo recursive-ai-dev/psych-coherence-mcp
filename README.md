@@ -15,6 +15,10 @@ This MCP server gives an LLM the ability to maintain **psychological coherence**
 - **Dialogue phase awareness**: Automatic phase detection (opening, information gathering, problem solving, rapport building, negotiation, closing)
 - **Humanization**: Disfluency injection (filled pauses, filler words, hesitations, self-repairs), persona voice markers, prosody hints — all calibrated to persona traits and emotional context
 - **Generation constraint building**: Converts psychological analysis into actionable LLM instructions (tone, structure, content, avoidance directives)
+- **Safety-first conversational triage**: Detects explicit self-harm and violence signals, planning, and immediacy; high-risk guidance overrides persona performance (rule-based, non-diagnostic)
+- **Review-first memory extraction**: Suggests preferences, identity facts, projects, and goals without silently storing them
+- **Closed-loop response tracking**: Records the assistant response that was actually delivered and checks basic persona, verbosity, and safety alignment
+- **Portable sessions**: Lists active sessions and exports/imports versioned JSON snapshots so state can survive process restarts
 
 ## Tools
 
@@ -31,6 +35,12 @@ This MCP server gives an LLM the ability to maintain **psychological coherence**
 | `psy_build_constraints` | Build generation constraints without full pipeline |
 | `psy_humanize_text` | Apply disfluencies and persona voice to clean text |
 | `psy_get_coherence_state` | Full session coherence report |
+| `psy_assess_safety` | Standalone explicit harm-signal triage with safety-first response guidance |
+| `psy_extract_memories` | Extract reviewable memory candidates without storing them |
+| `psy_record_response` | Record the delivered assistant turn and evaluate basic alignment |
+| `psy_list_sessions` | List active sessions and lifecycle metadata |
+| `psy_export_session` | Export complete state as a versioned JSON snapshot |
+| `psy_import_session` | Validate and restore an exported snapshot |
 | `psy_end_session` | End session with comprehensive summary |
 
 ## Personas
@@ -82,7 +92,13 @@ This starts the server on stdio transport (the protocol used by Claude Desktop a
 
 ```bash
 python test_server.py
+python test_expanded.py
+python test_adversarial.py
 ```
+
+`test_server.py` covers the original end-to-end workflow, while `test_expanded.py`
+covers safety triage, response recording, memory extraction, snapshot portability,
+and quality-audit regressions.
 
 ## How an LLM Uses This
 
@@ -95,10 +111,12 @@ The typical workflow:
    - Recalled memories
    - Topic transition guidance
    - Dialogue phase context
-3. **The LLM writes its response** using those constraints
-4. **`psy_humanize_text`** (optional) — add persona-authentic disfluencies
-5. **`psy_store_memory`** / **`psy_store_belief`** — persist important facts
-6. Repeat from step 2
+3. **The LLM writes its response** using those constraints. A `safety_first` priority must override normal persona styling.
+4. **`psy_humanize_text`** (optional) — add persona-authentic disfluencies; skip this for urgent safety responses
+5. **`psy_record_response`** — record what was actually delivered so both sides of the dialogue remain in context
+6. **`psy_extract_memories`** then **`psy_store_memory`** / **`psy_store_belief`** — review and persist important facts explicitly
+7. **`psy_export_session`** (optional) — retain state across server restarts
+8. Repeat from step 2
 
 ## Architecture
 

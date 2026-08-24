@@ -249,6 +249,14 @@ DISFLUENCY_PATTERNS = {
     "false_start_connectors": ["—", "—", "actually,", "wait,"],
 }
 VALID_MEMORY_TYPES = {"episodic", "semantic", "procedural", "emotional"}
+TOKEN_CLEANUP_RE = re.compile(r"^[^\w]+|[^\w]+$")
+FIRST_PERSON_PRONOUNS = {"i", "me", "my", "mine", "myself", "we", "us", "our", "ours"}
+HEDGE_WORDS = {"maybe", "perhaps", "possibly", "might", "could", "seems", "appears",
+               "somewhat", "rather", "arguably", "presumably", "allegedly", "apparently"}
+INTENSIFIER_WORDS = {"very", "really", "extremely", "absolutely", "totally", "completely",
+                     "utterly", "incredibly", "remarkably", "deeply", "profoundly"}
+SNAPSHOT_VERSION = 1
+MAX_SNAPSHOT_ITEMS = 1000
 
 # ─────────────────────────────────────────────────────────────────────
 # Data Models (Internal State)
@@ -555,7 +563,7 @@ def tokenize(text: str) -> List[str]:
     raw = text.split()
     tokens = []
     for t in raw:
-        cleaned = re.sub(r"^[^\w]+|[^\w]+$", "", t.lower())
+        cleaned = TOKEN_CLEANUP_RE.sub("", t.lower())
         if cleaned:
             tokens.append(cleaned)
     return tokens
@@ -582,8 +590,16 @@ def compute_linguistic_features(text: str) -> LinguisticFeatures:
     question_count = text.count("?")
     exclamation_count = text.count("!")
 
-    # Uppercase ratio (excluding first chars of sentences)
-    alpha_chars = [c for c in text if c.isalpha()]
+    # Uppercase ratio, excluding the first alphabetic character of each sentence.
+    non_initial_text = []
+    for sentence in sentences:
+        skipped_initial = False
+        for char in sentence:
+            if char.isalpha() and not skipped_initial:
+                skipped_initial = True
+                continue
+            non_initial_text.append(char)
+    alpha_chars = [c for c in non_initial_text if c.isalpha()]
     upper_chars = [c for c in alpha_chars if c.isupper()]
     uppercase_ratio = len(upper_chars) / max(len(alpha_chars), 1)
 
@@ -595,19 +611,12 @@ def compute_linguistic_features(text: str) -> LinguisticFeatures:
     avg_word_length = sum(len(w) for w in words) / max(word_count, 1)
 
     # First person pronouns ratio
-    first_person = {"i", "me", "my", "mine", "myself", "we", "us", "our", "ours"}
-    fp_count = sum(1 for w in words if w in first_person)
+    fp_count = sum(1 for w in words if w in FIRST_PERSON_PRONOUNS)
     first_person_ratio = fp_count / max(word_count, 1)
 
-    # Hedge words
-    hedges = {"maybe", "perhaps", "possibly", "might", "could", "seems", "appears",
-              "somewhat", "rather", "arguably", "presumably", "allegedly", "apparently"}
-    hedge_count = sum(1 for w in words if w in hedges)
-
-    # Intensifiers
-    intensifiers = {"very", "really", "extremely", "absolutely", "totally", "completely",
-                    "utterly", "incredibly", "remarkably", "deeply", "profoundly"}
-    intensifier_count = sum(1 for w in words if w in intensifiers)
+    # Hedge words and intensifiers
+    hedge_count = sum(1 for w in words if w in HEDGE_WORDS)
+    intensifier_count = sum(1 for w in words if w in INTENSIFIER_WORDS)
 
     return LinguisticFeatures(
         word_count=word_count,
@@ -819,7 +828,7 @@ def detect_needs(text: str, words: List[str]) -> List[str]:
     }
 
     for need, indicators in need_patterns.items():
-        if any(ind in text_lower for ind in indicators):
+        if any(re.search(r"(?<!\w)" + re.escape(ind) + r"(?!\w)", text_lower) for ind in indicators):
             needs.append(need)
 
     return needs
@@ -841,7 +850,7 @@ def detect_triggers(text: str) -> List[str]:
     }
 
     for trigger, indicators in trigger_patterns.items():
-        if any(ind in text_lower for ind in indicators):
+        if any(re.search(r"(?<!\w)" + re.escape(ind) + r"(?!\w)", text_lower) for ind in indicators):
             triggers.append(trigger)
 
     return triggers
@@ -884,6 +893,127 @@ def extract_topics(text: str) -> List[str]:
     return (bigrams[:3] + meaningful[:5])[:6]
 
 
+def assess_conversational_safety(text: str) -> Dict[str, Any]:
+    """Detect explicit safety signals and return conservative response guidance.
+
+    This is a rule-based conversational triage aid, not a clinical assessment.
+    It intentionally reports matched categories rather than echoing matched text.
+    """
+    lowered = text.lower()
+    categories: List[str] = []
+    signals: List[str] = []
+
+    self_harm_patterns = [
+        r"\bkill myself\b", r"\bend my (?:own )?life\b", r"\bhurt myself\b",
+        r"\bself[- ]harm\b", r"\bsuicid(?:e|al)\b", r"\bdon'?t want to (?:be alive|live)\b",
+        r"\bbetter off dead\b", r"\bno reason to live\b",
+    ]
+    violence_patterns = [
+        r"\b(?:kill|murder|shoot|stab|hurt) (?:him|her|them|someone|people)\b",
+        r"\b(?:they|he|she) (?:deserve|needs?) to die\b",
+    ]
+    immediacy_patterns = [
+        r"\bright now\b", r"\btonight\b", r"\btoday\b", r"\bthis (?:minute|hour|evening)\b",
+        r"\babout to\b", r"\bcan'?t stop myself\b",
+    ]
+    planning_patterns = [
+        r"\b(?:have|made|making) (?:a )?plan\b", r"\bplanned (?:it|this|everything)\b",
+        r"\bwrote (?:a|my) (?:note|goodbye)\b", r"\bknow how (?:i(?:'m| am) going to|to do it)\b",
+        r"\baccess to (?:a )?(?:gun|weapon|pills?)\b",
+    ]
+    protective_patterns = [
+        r"\bnot (?:going to|planning to|about to) (?:hurt|kill) myself\b",
+        r"\b(?:am|i'm) safe (?:right now|now)\b", r"\bno (?:plan|intent)\b",
+    ]
+
+    self_harm = any(re.search(pattern, lowered) for pattern in self_harm_patterns)
+    violence = any(re.search(pattern, lowered) for pattern in violence_patterns)
+    immediate = any(re.search(pattern, lowered) for pattern in immediacy_patterns)
+    planning = any(re.search(pattern, lowered) for pattern in planning_patterns)
+    protective = any(re.search(pattern, lowered) for pattern in protective_patterns)
+
+    if self_harm:
+        categories.append("self_harm_or_suicide")
+        signals.append("explicit_self_harm_language")
+    if violence:
+        categories.append("harm_to_others")
+        signals.append("explicit_violence_language")
+    if immediate:
+        signals.append("time_immediacy")
+    if planning:
+        signals.append("planning_or_means")
+    if protective:
+        signals.append("stated_protective_context")
+
+    if (self_harm or violence) and immediate and planning and not protective:
+        level = "imminent"
+    elif (self_harm or violence) and (immediate or planning) and not protective:
+        level = "high"
+    elif self_harm or violence:
+        level = "moderate" if not protective else "low"
+    else:
+        level = "none"
+
+    if level in {"high", "imminent"}:
+        directives = [
+            "Prioritize immediate safety over persona style or the original task.",
+            "Respond calmly and directly; ask whether the person is in immediate danger.",
+            "Encourage contacting local emergency services or a crisis line and a trusted nearby person.",
+            "Do not leave the person alone with only generic reassurance; keep the exchange focused on the next safe step.",
+        ]
+    elif level in {"low", "moderate"}:
+        directives = [
+            "Acknowledge the distress without judgment or dramatization.",
+            "Ask a brief, direct safety check about current intent, plan, and immediate safety.",
+            "Encourage support from a trusted person or qualified local professional.",
+        ]
+    else:
+        directives = []
+
+    return {
+        "risk_level": level,
+        "categories": categories,
+        "signals": signals,
+        "response_directives": directives,
+        "requires_safety_first_response": level in {"high", "imminent"},
+        "disclaimer": "Rule-based conversational signal detection; not a diagnosis or substitute for professional assessment.",
+    }
+
+
+def extract_memory_candidates(text: str) -> List[Dict[str, Any]]:
+    """Extract conservative, user-reviewable long-term memory candidates."""
+    # Never turn acute harm language into an ordinary goal/preference memory.
+    if assess_conversational_safety(text)["risk_level"] != "none":
+        return []
+    candidates: List[Dict[str, Any]] = []
+    patterns = [
+        ("semantic", "preference", r"\bmy favou?rite ([^.!?]{1,40}?) is ([^.!?]{1,100})"),
+        ("semantic", "preference", r"\bi (?:prefer|enjoy|love) ([^.!?]{2,120})"),
+        ("semantic", "identity", r"\bi(?:'m| am) (?:a|an) ([^.!?]{2,100})"),
+        ("episodic", "project", r"\bi(?:'m| am) (?:working on|building|writing) ([^.!?]{2,160})"),
+        ("semantic", "goal", r"\bmy goal is (?:to )?([^.!?]{2,160})"),
+        ("semantic", "goal", r"\bi want to ([^.!?]{2,160})"),
+    ]
+    seen = set()
+    for memory_type, tag, pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            content = match.group(0).strip(" ,")
+            key = content.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({
+                "content": content,
+                "memory_type": memory_type,
+                "importance": 0.65 if tag in {"goal", "project"} else 0.5,
+                "tags": [tag] + extract_topics(content)[:2],
+                "source_span": [match.start(), match.end()],
+            })
+            if len(candidates) >= 10:
+                return candidates
+    return candidates
+
+
 def full_analysis(text: str) -> Dict[str, Any]:
     """Run the complete psychological analysis pipeline on a text."""
     words = tokenize(text)
@@ -915,6 +1045,8 @@ def full_analysis(text: str) -> Dict[str, Any]:
         "mood_state": mood.to_dict(),
         "linguistic_features": linguistic.to_dict(),
         "topics": topics,
+        "safety_assessment": assess_conversational_safety(text),
+        "memory_candidates": extract_memory_candidates(text),
     }
 
 
@@ -1013,7 +1145,7 @@ def update_topic_state(session: Session, topics: List[str]) -> Dict[str, Any]:
         state.topic_confidence = 0.7
         return {"transition_type": "opening", "marker": "", "topic": new_topic}
 
-    if new_topic == previous or any(kw in previous for kw in topics[:3]):
+    if new_topic == previous or any(kw == previous or kw in previous.split() for kw in topics[:3]):
         state.transition_type = "continuation"
         state.topic_confidence = min(1.0, state.topic_confidence + 0.05)
         marker = random.choice(DISCOURSE_MARKERS["continuation"])
@@ -1027,7 +1159,6 @@ def update_topic_state(session: Session, topics: List[str]) -> Dict[str, Any]:
         return {"transition_type": "return", "marker": marker, "topic": new_topic, "returning_from": previous}
 
     # New topic
-    state.topic_history.append(previous)
     state.current_topic = new_topic
     state.topic_history.append(new_topic)
     state.transition_type = "shift"
@@ -1044,13 +1175,13 @@ def update_dialogue_phase(session: Session, analysis: Dict[str, Any], user_text:
 
     # Check for closing signals
     closing_signals = ["bye", "goodbye", "thanks", "thank you", "that's all", "gotta go", "see you", "later"]
-    if any(sig in text_lower for sig in closing_signals):
+    if any(re.search(r"(?<!\w)" + re.escape(sig) + r"(?!\w)", text_lower) for sig in closing_signals):
         session.dialogue_phase = "closing"
         return "closing"
 
     # Check for greeting signals (at start)
     greeting_signals = ["hi", "hello", "hey", "good morning", "good afternoon", "howdy", "greetings"]
-    if session.turn_count <= 2 and any(sig in text_lower for sig in greeting_signals):
+    if session.turn_count <= 2 and any(re.search(r"(?<!\w)" + re.escape(sig) + r"(?!\w)", text_lower) for sig in greeting_signals):
         session.dialogue_phase = "opening"
         return "opening"
 
@@ -1092,9 +1223,10 @@ def compute_coherence_score(session: Session) -> Dict[str, float]:
     # Memory coherence: ratio of memories that are accessible and recent
     if session.long_term_memories:
         recent = 0
+        now = utc_now()
         for memory in session.long_term_memories:
             try:
-                age_seconds = (utc_now() - parse_timestamp(memory.timestamp)).total_seconds()
+                age_seconds = (now - parse_timestamp(memory.timestamp)).total_seconds()
                 if age_seconds < 7200:
                     recent += 1
             except (ValueError, TypeError):
@@ -1299,6 +1431,17 @@ def build_generation_constraints(analysis: Dict[str, Any], persona: Dict[str, An
     }
     constraints["phase_guidance"] = phase_guidance.get(session.dialogue_phase, "")
 
+    # Safety always outranks persona performance and normal conversational goals.
+    safety = analysis.get("safety_assessment", {})
+    constraints["safety"] = safety
+    if safety.get("requires_safety_first_response"):
+        constraints["priority"] = "safety_first"
+        constraints["tone_directives"] = safety.get("response_directives", []) + constraints.get("tone_directives", [])
+        constraints["avoidance_directives"] = [
+            "Do not role-play, humanize, add playful disfluencies, or continue the ordinary task before addressing immediate safety.",
+            "Do not claim to diagnose, guarantee confidentiality, or promise that everything will be fine.",
+        ] + constraints.get("avoidance_directives", [])
+
     return constraints
 
 
@@ -1389,7 +1532,7 @@ def humanize_text(text: str, persona: Dict[str, Any],
 
     # ── Apply persona voice markers ──
     # Occasionally prepend a signature starter to the first sentence
-    if random.random() < 0.25 and voice.get("preferred_starters"):
+    if humanized and random.random() < 0.25 and voice.get("preferred_starters"):
         starter = random.choice(voice["preferred_starters"])
         if not humanized.lower().startswith(starter.lower()[:10]):
             # Only if it wouldn't be redundant
@@ -1558,6 +1701,27 @@ class SessionIdInput(BaseModel):
     session_id: str = Field(..., description="Active session ID.", min_length=1, max_length=100)
 
 
+class SafetyAssessmentInput(BaseModel):
+    """Input for standalone conversational safety signal assessment."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    text: str = Field(..., description="Text to assess for explicit harm-related signals.", min_length=1, max_length=10000)
+
+
+class RecordResponseInput(BaseModel):
+    """Input for recording and evaluating the assistant's actual response."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    session_id: str = Field(..., description="Active session ID.", min_length=1, max_length=100)
+    response_text: str = Field(..., description="The response actually shown to the user.", min_length=1, max_length=10000)
+
+
+class ImportSessionInput(BaseModel):
+    """Input for restoring a previously exported session snapshot."""
+    model_config = ConfigDict(extra="forbid")
+    snapshot: Dict[str, Any] = Field(..., description="Snapshot object returned by psy_export_session.")
+    new_session_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    overwrite: bool = Field(default=False, description="Replace an active session with the same ID.")
+
+
 # ── Helper: get session or error ──
 
 async def _get_session(session_id: str) -> Session:
@@ -1566,6 +1730,89 @@ async def _get_session(session_id: str) -> Session:
     if session is None:
         raise ValueError(f"Session '{session_id}' not found. Create one first with psy_create_session.")
     session.last_accessed = datetime.now(timezone.utc).isoformat()
+    return session
+
+
+def _session_snapshot(session: Session) -> Dict[str, Any]:
+    """Convert session state into a JSON-safe, versioned snapshot."""
+    return {
+        "snapshot_version": SNAPSHOT_VERSION,
+        "exported_at": iso_utc_now(),
+        "session": {
+            "session_id": session.session_id,
+            "persona_id": session.persona_id,
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "turn_count": session.turn_count,
+            "short_term_memory": list(session.short_term_memory),
+            "long_term_memories": [asdict(memory) for memory in session.long_term_memories],
+            "belief_graph": {
+                entity: {attribute: asdict(belief) for attribute, belief in attributes.items()}
+                for entity, attributes in session.belief_graph.items()
+            },
+            "contradiction_log": session.contradiction_log,
+            "topic_state": asdict(session.topic_state),
+            "dialogue_phase": session.dialogue_phase,
+            "user_profile": asdict(session.user_profile),
+            "user_profile_history": [asdict(profile) for profile in session.user_profile_history],
+            "entity_registry": session.entity_registry,
+            "pronoun_map": session.pronoun_map,
+            "response_history": session.response_history,
+        },
+    }
+
+
+def _restore_session(snapshot: Dict[str, Any], session_id: Optional[str] = None) -> Session:
+    """Validate and restore a session from an exported snapshot."""
+    if snapshot.get("snapshot_version") != SNAPSHOT_VERSION:
+        raise ValueError(f"Unsupported snapshot_version; expected {SNAPSHOT_VERSION}.")
+    data = snapshot.get("session")
+    if not isinstance(data, dict):
+        raise ValueError("Snapshot is missing the session object.")
+    persona_id = data.get("persona_id")
+    if persona_id not in PERSONAS:
+        raise ValueError(f"Snapshot references unknown persona '{persona_id}'.")
+    sid = session_id or data.get("session_id")
+    if not isinstance(sid, str) or not sid.strip() or len(sid) > 100:
+        raise ValueError("Snapshot session_id must contain 1-100 characters.")
+
+    def limited_list(name: str) -> List[Any]:
+        value = data.get(name, [])
+        if not isinstance(value, list):
+            raise ValueError(f"Snapshot field '{name}' must be a list.")
+        if len(value) > MAX_SNAPSHOT_ITEMS:
+            raise ValueError(f"Snapshot field '{name}' exceeds {MAX_SNAPSHOT_ITEMS} items.")
+        return value
+
+    memories = [MemoryEntry(**item) for item in limited_list("long_term_memories")]
+    profile_history = [PersonalityProfile(**item) for item in limited_list("user_profile_history")]
+    beliefs: Dict[str, Dict[str, BeliefEntry]] = defaultdict(dict)
+    raw_beliefs = data.get("belief_graph", {})
+    if not isinstance(raw_beliefs, dict) or len(raw_beliefs) > MAX_SNAPSHOT_ITEMS:
+        raise ValueError("Snapshot belief_graph is invalid or too large.")
+    for entity, attributes in raw_beliefs.items():
+        if not isinstance(attributes, dict):
+            raise ValueError("Each belief_graph entity must map to attributes.")
+        beliefs[str(entity)] = {str(attribute): BeliefEntry(**belief) for attribute, belief in attributes.items()}
+
+    session = Session(
+        session_id=sid.strip(),
+        persona_id=persona_id,
+        created_at=str(data.get("created_at", iso_utc_now())),
+        turn_count=max(0, int(data.get("turn_count", 0))),
+        short_term_memory=deque(limited_list("short_term_memory"), maxlen=30),
+        long_term_memories=memories,
+        belief_graph=beliefs,
+        contradiction_log=limited_list("contradiction_log"),
+        topic_state=TopicState(**data.get("topic_state", {})),
+        dialogue_phase=str(data.get("dialogue_phase", "opening")),
+        user_profile=PersonalityProfile(**data.get("user_profile", {})),
+        user_profile_history=profile_history,
+        entity_registry=dict(data.get("entity_registry", {})),
+        pronoun_map=dict(data.get("pronoun_map", {})),
+        response_history=limited_list("response_history"),
+        updated_at=str(data.get("updated_at", iso_utc_now())),
+    )
     return session
 
 
@@ -1787,20 +2034,23 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
 
         # Step 6: Recall relevant long-term memories
         query_words = tokenize(params.user_text)
-        relevant_memories = []
+        ranked_memories = []
         for mem in session.long_term_memories:
             relevance = compute_memory_relevance(query_words, mem)
             if relevance > 0.1:
-                mem.access_count += 1
-                relevant_memories.append({
-                    "content": mem.content,
-                    "type": mem.memory_type,
-                    "importance": mem.importance,
-                    "relevance_score": relevance,
-                    "tags": mem.tags,
-                })
-        relevant_memories.sort(key=lambda x: x["relevance_score"], reverse=True)
-        relevant_memories = relevant_memories[:5]
+                ranked_memories.append((relevance, mem))
+        ranked_memories.sort(key=lambda item: item[0], reverse=True)
+        relevant_memories = []
+        for relevance, mem in ranked_memories[:5]:
+            mem.access_count += 1
+            relevant_memories.append({
+                "memory_id": mem.id,
+                "content": mem.content,
+                "type": mem.memory_type,
+                "importance": mem.importance,
+                "relevance_score": relevance,
+                "tags": mem.tags,
+            })
 
         # Step 7: Build generation constraints
         constraints = build_generation_constraints(analysis, persona, session)
@@ -1838,6 +2088,7 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
             "user_text": params.user_text[:200],
             "phase": dialogue_phase,
             "primary_emotion": analysis["mood_state"]["primary_emotion"],
+            "risk_level": analysis["safety_assessment"]["risk_level"],
             "coherence": coherence["overall"],
             "timestamp": iso_utc_now(),
         })
@@ -1920,28 +2171,33 @@ async def psy_recall(params: RecallInput) -> str:
         if params.memory_type:
             candidates = [m for m in candidates if m.memory_type == params.memory_type]
 
-        scored = []
+        ranked = []
         for mem in candidates:
             relevance = compute_memory_relevance(query_words, mem)
             if relevance > 0.05:
-                mem.access_count += 1
-                scored.append({
-                    "memory_id": mem.id,
-                    "content": mem.content,
-                    "memory_type": mem.memory_type,
-                    "importance": mem.importance,
-                    "relevance_score": relevance,
-                    "tags": mem.tags,
-                    "timestamp": mem.timestamp,
-                    "access_count": mem.access_count,
-                })
+                ranked.append((relevance, mem))
 
-        scored.sort(key=lambda x: x["relevance_score"], reverse=True)
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        selected = ranked[:params.max_results]
+        scored = []
+        for relevance, mem in selected:
+            mem.access_count += 1
+            scored.append({
+                "memory_id": mem.id,
+                "content": mem.content,
+                "memory_type": mem.memory_type,
+                "importance": mem.importance,
+                "relevance_score": relevance,
+                "tags": mem.tags,
+                "timestamp": mem.timestamp,
+                "access_count": mem.access_count,
+            })
+
         return json.dumps({
             "query": params.query,
-            "results": scored[:params.max_results],
+            "results": scored,
             "total_searched": len(candidates),
-            "total_matched": len(scored),
+            "total_matched": len(ranked),
         }, indent=2)
 
 
@@ -2221,6 +2477,160 @@ async def psy_build_constraints(params: BuildConstraintsInput) -> str:
             "directness": analysis["mood_state"]["directness_level"],
         }
         return json.dumps(constraints, indent=2, default=str)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Additional safety, response lifecycle, and portability tools
+# ─────────────────────────────────────────────────────────────────────
+
+@mcp.tool(
+    name="psy_assess_safety",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+async def psy_assess_safety(params: SafetyAssessmentInput) -> str:
+    """Assess explicit self-harm or violence signals and return response priorities.
+
+    This deterministic triage aid does not diagnose a person and must not replace
+    professional judgment. It is useful when a client wants safety guidance without
+    running the complete personality and coherence pipeline.
+    """
+    return json.dumps(assess_conversational_safety(params.text), indent=2)
+
+
+@mcp.tool(
+    name="psy_extract_memories",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+async def psy_extract_memories(params: AnalyzeInputModel) -> str:
+    """Extract reviewable preference, identity, project, and goal memory candidates.
+
+    Candidates are never stored automatically. Review them and explicitly call
+    psy_store_memory, which avoids silently retaining sensitive user information.
+    """
+    candidates = extract_memory_candidates(params.text)
+    return json.dumps({"candidates": candidates, "count": len(candidates), "stored": False}, indent=2)
+
+
+@mcp.tool(
+    name="psy_record_response",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+async def psy_record_response(params: RecordResponseInput) -> str:
+    """Record the assistant response actually delivered and evaluate basic alignment.
+
+    Calling this after generation closes the conversation-state loop: later briefs
+    can see both user and assistant turns instead of user messages alone.
+    """
+    session = await _get_session(params.session_id)
+    async with session.session_lock:
+        persona = PERSONAS[session.persona_id]
+        words = tokenize(params.response_text)
+        voice = persona.get("voice_markers", {})
+        all_markers = (
+            voice.get("preferred_starters", [])
+            + voice.get("hedges", [])
+            + voice.get("signature_phrases", [])
+        )
+        marker_hits = [marker for marker in all_markers if marker.lower() in params.response_text.lower()]
+        target_words = int(40 + persona.get("communication_style", {}).get("verbosity", 0.5) * 180)
+        last_generation = session.response_history[-1] if session.response_history else {}
+        safety_required = last_generation.get("risk_level") in {"high", "imminent"}
+        safety_terms = ["safe", "emergency", "crisis", "call", "trusted person", "nearby", "immediate danger"]
+        safety_hits = [term for term in safety_terms if term in params.response_text.lower()]
+
+        recommendations = []
+        if len(words) > target_words * 1.8:
+            recommendations.append("Shorten the response to better match the persona's target verbosity.")
+        elif len(words) < max(12, target_words * 0.25):
+            recommendations.append("Add enough substance to address the user's need before closing.")
+        if not marker_hits:
+            recommendations.append("Consider one subtle persona voice marker; avoid forcing several.")
+        if safety_required and len(safety_hits) < 2:
+            recommendations.insert(0, "Safety alignment is insufficient: directly check immediate safety and offer concrete human help.")
+
+        recorded_at = iso_utc_now()
+        session.short_term_memory.append({
+            "turn": session.turn_count,
+            "role": "assistant",
+            "text": params.response_text[:500],
+            "timestamp": recorded_at,
+        })
+        session.updated_at = recorded_at
+        if session.response_history:
+            session.response_history[-1]["assistant_text"] = params.response_text[:500]
+            session.response_history[-1]["assistant_recorded_at"] = recorded_at
+
+        return json.dumps({
+            "status": "recorded",
+            "session_id": session.session_id,
+            "turn": session.turn_count,
+            "alignment": {
+                "word_count": len(words),
+                "target_word_count": target_words,
+                "persona_marker_hits": marker_hits,
+                "safety_response_required": safety_required,
+                "safety_language_hits": safety_hits,
+                "recommendations": recommendations,
+                "passes_safety_check": not safety_required or len(safety_hits) >= 2,
+            },
+        }, indent=2)
+
+
+@mcp.tool(
+    name="psy_list_sessions",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+async def psy_list_sessions() -> str:
+    """List active in-memory sessions with compact lifecycle metadata."""
+    async with SESSIONS_LOCK:
+        sessions = list(SESSIONS.values())
+    result = [{
+        "session_id": session.session_id,
+        "persona_id": session.persona_id,
+        "persona_name": PERSONAS[session.persona_id]["name"],
+        "turn_count": session.turn_count,
+        "dialogue_phase": session.dialogue_phase,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "last_accessed": session.last_accessed,
+    } for session in sessions]
+    return json.dumps({"sessions": result, "count": len(result)}, indent=2)
+
+
+@mcp.tool(
+    name="psy_export_session",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+async def psy_export_session(params: SessionIdInput) -> str:
+    """Export complete session state as a versioned JSON snapshot.
+
+    The snapshot may contain sensitive conversation text. Store and transmit it
+    according to the user's privacy expectations.
+    """
+    session = await _get_session(params.session_id)
+    async with session.session_lock:
+        return json.dumps(_session_snapshot(session), indent=2, default=str)
+
+
+@mcp.tool(
+    name="psy_import_session",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+async def psy_import_session(params: ImportSessionInput) -> str:
+    """Restore a validated session snapshot, optionally under a new session ID."""
+    session = _restore_session(params.snapshot, params.new_session_id)
+    async with SESSIONS_LOCK:
+        if session.session_id in SESSIONS and not params.overwrite:
+            return json.dumps({"error": f"Session '{session.session_id}' already exists; set overwrite=true or choose new_session_id."})
+        SESSIONS[session.session_id] = session
+    return json.dumps({
+        "status": "imported",
+        "session_id": session.session_id,
+        "persona_id": session.persona_id,
+        "turn_count": session.turn_count,
+        "memories_restored": len(session.long_term_memories),
+        "beliefs_restored": sum(len(attributes) for attributes in session.belief_graph.values()),
+    }, indent=2)
 
 
 # ─────────────────────────────────────────────────────────────────────
