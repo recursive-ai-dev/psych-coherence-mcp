@@ -2,27 +2,39 @@
 Integration test for Psychological Coherence MCP Server.
 Exercises every tool and validates output structure and logic.
 """
+
 import asyncio
 import json
 import sys
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from server import (
-    psy_list_personas, psy_get_persona, psy_create_session,
-    psy_analyze_input, psy_generate_response, psy_store_memory,
-    psy_recall, psy_store_belief, psy_get_coherence_state,
-    psy_humanize_text, psy_build_constraints, psy_end_session,
-    CreateSessionInput, AnalyzeInputModel, GenerateResponseInput,
-    StoreMemoryInput, RecallInput, StoreBeliefInput, SessionIdInput,
-    HumanizeInput, GetPersonaInput, BuildConstraintsInput,
+from psych_coherence_mcp import (
+    AnalyzeInputModel,
+    BuildConstraintsInput,
+    CreateSessionInput,
+    GenerateResponseInput,
+    GetPersonaInput,
+    HumanizeInput,
+    RecallInput,
+    SessionIdInput,
+    StoreBeliefInput,
+    StoreMemoryInput,
+    psy_analyze_input,
+    psy_build_constraints,
+    psy_create_session,
+    psy_end_session,
+    psy_generate_response,
+    psy_get_coherence_state,
+    psy_get_persona,
+    psy_humanize_text,
+    psy_list_personas,
+    psy_recall,
+    psy_store_belief,
+    psy_store_memory,
 )
 
 PASS = 0
 FAIL = 0
+
 
 def check(name, condition, detail=""):
     global PASS, FAIL
@@ -32,6 +44,7 @@ def check(name, condition, detail=""):
     else:
         FAIL += 1
         print(f"  ❌ {name} — {detail}")
+
 
 async def main():
     global PASS, FAIL
@@ -57,7 +70,11 @@ async def main():
 
     # ── 3. Create Session ──
     print("\n▸ psy_create_session")
-    result = json.loads(await psy_create_session(CreateSessionInput(persona_id="counselor_amara", session_id="test-001")))
+    result = json.loads(
+        await psy_create_session(
+            CreateSessionInput(persona_id="counselor_amara", session_id="test-001")
+        )
+    )
     check("Returns session_id", result.get("session_id") == "test-001")
     check("Status active", result.get("status") == "active")
     check("Persona name correct", result.get("persona") == "Amara")
@@ -68,89 +85,135 @@ async def main():
     result = json.loads(await psy_analyze_input(AnalyzeInputModel(text=test_text)))
     mood = result.get("mood_state", {})
     personality = result.get("personality_profile", {})
-    check("Detects anxiety-related emotion", mood.get("primary_emotion") in ("anxiety", "fear", "sadness"))
+    check(
+        "Detects anxiety-related emotion",
+        mood.get("primary_emotion") in ("anxiety", "fear", "sadness"),
+    )
     check("Emotion intensity > 0.3", mood.get("emotion_intensity", 0) > 0.3)
     check("Negative valence", mood.get("valence", 0) < 0)
     check("Detects needs", len(mood.get("detected_needs", [])) > 0)
     check("Personality has confidence", personality.get("confidence", 0) > 0)
     check("Neuroticism elevated", personality.get("neuroticism", 0.5) > 0.5)
-    check("Has linguistic features", result.get("linguistic_features", {}).get("word_count", 0) > 10)
+    check(
+        "Has linguistic features", result.get("linguistic_features", {}).get("word_count", 0) > 10
+    )
     check("Extracts topics", len(result.get("topics", [])) > 0)
 
     # ── 5. Analyze Input (with session) ──
     print("\n▸ psy_analyze_input (session-linked)")
-    result = json.loads(await psy_analyze_input(AnalyzeInputModel(text=test_text, session_id="test-001")))
-    check("Session profile updated", result.get("session_profile_updated") == True)
+    result = json.loads(
+        await psy_analyze_input(AnalyzeInputModel(text=test_text, session_id="test-001"))
+    )
+    check("Session profile updated", result.get("session_profile_updated"))
     check("Has blended profile", "blended_user_profile" in result)
 
     # ── 6. Store Memory ──
     print("\n▸ psy_store_memory")
-    result = json.loads(await psy_store_memory(StoreMemoryInput(
-        session_id="test-001",
-        content="The user is working on a creative writing project with a deadline next Friday.",
-        memory_type="episodic",
-        importance=0.8,
-        tags=["project", "deadline", "creative_writing"],
-    )))
+    result = json.loads(
+        await psy_store_memory(
+            StoreMemoryInput(
+                session_id="test-001",
+                content="The user is working on a creative writing project with a deadline next Friday.",
+                memory_type="episodic",
+                importance=0.8,
+                tags=["project", "deadline", "creative_writing"],
+            )
+        )
+    )
     check("Returns memory_id", "memory_id" in result)
     check("Status stored", result.get("status") == "stored")
     check("Has associations", len(result.get("associations", [])) > 0)
 
     # Store a second memory
-    await psy_store_memory(StoreMemoryInput(
-        session_id="test-001",
-        content="The user's favorite color is blue and they enjoy poetry.",
-        memory_type="semantic",
-        importance=0.4,
-        tags=["preference", "personality"],
-    ))
+    await psy_store_memory(
+        StoreMemoryInput(
+            session_id="test-001",
+            content="The user's favorite color is blue and they enjoy poetry.",
+            memory_type="semantic",
+            importance=0.4,
+            tags=["preference", "personality"],
+        )
+    )
 
     # ── 7. Recall Memories ──
     print("\n▸ psy_recall")
-    result = json.loads(await psy_recall(RecallInput(session_id="test-001", query="creative project deadline")))
+    result = json.loads(
+        await psy_recall(RecallInput(session_id="test-001", query="creative project deadline"))
+    )
     check("Returns results", len(result.get("results", [])) > 0)
     check("Top result is relevant", result["results"][0]["relevance_score"] > 0.1)
     check("Has total_searched", result.get("total_searched", 0) > 0)
 
     # ── 8. Store Belief (no contradiction) ──
     print("\n▸ psy_store_belief (no contradiction)")
-    result = json.loads(await psy_store_belief(StoreBeliefInput(
-        session_id="test-001", entity="user", attribute="occupation", value="writer", confidence=0.9,
-    )))
+    result = json.loads(
+        await psy_store_belief(
+            StoreBeliefInput(
+                session_id="test-001",
+                entity="user",
+                attribute="occupation",
+                value="writer",
+                confidence=0.9,
+            )
+        )
+    )
     check("Stored successfully", result.get("status") == "stored")
-    check("No contradiction", result.get("contradiction_detected") == False)
+    check("No contradiction", not result.get("contradiction_detected"))
 
     # ── 9. Store Belief (WITH contradiction) ──
     print("\n▸ psy_store_belief (with contradiction)")
-    result = json.loads(await psy_store_belief(StoreBeliefInput(
-        session_id="test-001", entity="user", attribute="occupation", value="engineer", confidence=0.7,
-    )))
-    check("Contradiction detected", result.get("contradiction_detected") == True)
+    result = json.loads(
+        await psy_store_belief(
+            StoreBeliefInput(
+                session_id="test-001",
+                entity="user",
+                attribute="occupation",
+                value="engineer",
+                confidence=0.7,
+            )
+        )
+    )
+    check("Contradiction detected", result.get("contradiction_detected"))
     check("Shows previous value", result.get("contradiction", {}).get("previous_value") == "writer")
     check("Shows resolution strategies", len(result.get("resolution_strategies", [])) > 0)
 
     # ── 10. Generate Response (Full Pipeline) ──
     print("\n▸ psy_generate_response")
-    result = json.loads(await psy_generate_response(GenerateResponseInput(
-        session_id="test-001",
-        user_text="I don't know if I can finish this project. Every time I sit down to write, my mind goes blank. It's like the words are stuck somewhere I can't reach.",
-    )))
+    result = json.loads(
+        await psy_generate_response(
+            GenerateResponseInput(
+                session_id="test-001",
+                user_text="I don't know if I can finish this project. Every time I sit down to write, my mind goes blank. It's like the words are stuck somewhere I can't reach.",
+            )
+        )
+    )
     check("Has generation_constraints", "generation_constraints" in result)
     check("Has persona_voice", "persona_voice" in result.get("generation_constraints", {}))
-    check("Has tone_directives", len(result.get("generation_constraints", {}).get("tone_directives", [])) > 0)
-    check("Has content_directives", len(result.get("generation_constraints", {}).get("content_directives", [])) > 0)
+    check(
+        "Has tone_directives",
+        len(result.get("generation_constraints", {}).get("tone_directives", [])) > 0,
+    )
+    check(
+        "Has content_directives",
+        len(result.get("generation_constraints", {}).get("content_directives", [])) > 0,
+    )
     check("Has psychological_analysis", "psychological_analysis" in result)
     check("Has topic_transition", "topic_transition" in result)
     check("Has dialogue_phase", result.get("dialogue_phase") is not None)
     check("Has coherence_scores", "overall" in result.get("coherence_scores", {}))
     check("Has relevant_memories", isinstance(result.get("relevant_memories"), list))
     check("Has humanization_config", "humanization_config" in result)
-    check("Has formative_context", len(result.get("generation_constraints", {}).get("formative_context", [])) > 0)
+    check(
+        "Has formative_context",
+        len(result.get("generation_constraints", {}).get("formative_context", [])) > 0,
+    )
 
     # Verify the constraints are actionable
     gc = result["generation_constraints"]
     check("Persona name in constraints", gc.get("persona_name") == "Amara")
-    check("Has preferred_starters", len(gc.get("persona_voice", {}).get("preferred_starters", [])) > 0)
+    check(
+        "Has preferred_starters", len(gc.get("persona_voice", {}).get("preferred_starters", [])) > 0
+    )
     check("Has target_formality", "target_formality" in gc.get("psychological_calibration", {}))
     check("Has target_directness", "target_directness" in gc.get("psychological_calibration", {}))
     check("Has phase_guidance", gc.get("phase_guidance", "") != "")
@@ -158,27 +221,41 @@ async def main():
     # ── 11. Humanize Text ──
     print("\n▸ psy_humanize_text")
     clean_text = "I understand how frustrating that feeling can be. Creative blocks often come from putting too much pressure on ourselves. Sometimes the words need space to find their way to us, rather than the other way around."
-    result = json.loads(await psy_humanize_text(HumanizeInput(
-        text=clean_text,
-        persona_id="counselor_amara",
-        disfluency_level=0.6,
-        emotional_context="empathy",
-        emotion_intensity=0.5,
-    )))
+    result = json.loads(
+        await psy_humanize_text(
+            HumanizeInput(
+                text=clean_text,
+                persona_id="counselor_amara",
+                disfluency_level=0.6,
+                emotional_context="empathy",
+                emotion_intensity=0.5,
+            )
+        )
+    )
     check("Has humanized_text", len(result.get("humanized_text", "")) > 0)
-    check("Text was modified", result.get("humanized_text") != clean_text or result.get("disfluency_count", 0) >= 0)
+    check(
+        "Text was modified",
+        result.get("humanized_text") != clean_text or result.get("disfluency_count", 0) >= 0,
+    )
     check("Has modifications list", isinstance(result.get("modifications"), list))
     check("Has prosody_hints", isinstance(result.get("prosody_hints"), list))
 
     # ── 12. Build Constraints (standalone) ──
     print("\n▸ psy_build_constraints")
-    result = json.loads(await psy_build_constraints(BuildConstraintsInput(
-        session_id="test-001",
-        user_text="Can you explain quantum computing in simple terms? I'm curious but it seems really complicated.",
-    )))
+    result = json.loads(
+        await psy_build_constraints(
+            BuildConstraintsInput(
+                session_id="test-001",
+                user_text="Can you explain quantum computing in simple terms? I'm curious but it seems really complicated.",
+            )
+        )
+    )
     check("Has persona_voice", "persona_voice" in result)
     check("Has analysis summary", "psychological_analysis_summary" in result)
-    check("Detects information need", "information" in result.get("psychological_analysis_summary", {}).get("detected_needs", []))
+    check(
+        "Detects information need",
+        "information" in result.get("psychological_analysis_summary", {}).get("detected_needs", []),
+    )
 
     # ── 13. Get Coherence State ──
     print("\n▸ psy_get_coherence_state")

@@ -39,7 +39,6 @@
       ],
       "structural_directives": [],
       "content_directives": [
-        "Be present and personal. Share relevant perspective, not just data.",
         "Respect their agency. Offer options, not prescriptions."
       ],
       "avoidance_directives": [
@@ -56,8 +55,16 @@
         "[professional_crisis]: Lost a client to suicide early in her career. Carries it not as guilt but as gravity. \u2192 never takes distress lightly, always checks beneath the surface",
         "[cultural_bridge]: Lives between two cultures, never fully belonging to either. \u2192 understands liminality and the pain of not fitting neatly into categories"
       ],
-      "dialogue_phase": "rapport_building",
-      "phase_guidance": "Deepen the connection. Be more personal and reflective."
+      "dialogue_phase": "negotiation",
+      "phase_guidance": "Navigate differing perspectives. Find common ground.",
+      "safety": {
+        "risk_level": "none",
+        "categories": [],
+        "signals": [],
+        "response_directives": [],
+        "requires_safety_first_response": false,
+        "disclaimer": "Rule-based conversational signal detection; not a diagnosis or substitute for professional assessment."
+      }
     },
     "coherence_scores": {
       "topic_coherence": 1.0,
@@ -119,14 +126,22 @@
         "[cultural_bridge]: Lives between two cultures, never fully belonging to either. \u2192 understands liminality and the pain of not fitting neatly into categories"
       ],
       "dialogue_phase": "opening",
-      "phase_guidance": "Establish rapport. Be welcoming but not overbearing."
+      "phase_guidance": "Establish rapport. Be welcoming but not overbearing.",
+      "safety": {
+        "risk_level": "none",
+        "categories": [],
+        "signals": [],
+        "response_directives": [],
+        "requires_safety_first_response": false,
+        "disclaimer": "Rule-based conversational signal detection; not a diagnosis or substitute for professional assessment."
+      }
     },
     "coherence_scores": {
-      "topic_coherence": 0.833,
+      "topic_coherence": 0.75,
       "memory_coherence": 0.5,
       "belief_coherence": 1.0,
       "profile_stability": 0.947,
-      "overall": 0.839
+      "overall": 0.814
     }
   },
   {
@@ -188,14 +203,22 @@
         "[cultural_bridge]: Lives between two cultures, never fully belonging to either. \u2192 understands liminality and the pain of not fitting neatly into categories"
       ],
       "dialogue_phase": "problem_solving",
-      "phase_guidance": "Help develop solutions. Balance guidance with respect for autonomy."
+      "phase_guidance": "Help develop solutions. Balance guidance with respect for autonomy.",
+      "safety": {
+        "risk_level": "none",
+        "categories": [],
+        "signals": [],
+        "response_directives": [],
+        "requires_safety_first_response": false,
+        "disclaimer": "Rule-based conversational signal detection; not a diagnosis or substitute for professional assessment."
+      }
     },
     "coherence_scores": {
-      "topic_coherence": 0.8,
+      "topic_coherence": 0.667,
       "memory_coherence": 0.5,
       "belief_coherence": 1.0,
       "profile_stability": 0.978,
-      "overall": 0.836
+      "overall": 0.796
     }
   },
   {
@@ -253,14 +276,22 @@
         "[cultural_bridge]: Lives between two cultures, never fully belonging to either. \u2192 understands liminality and the pain of not fitting neatly into categories"
       ],
       "dialogue_phase": "closing",
-      "phase_guidance": "Wrap up warmly. Summarize key points if appropriate."
+      "phase_guidance": "Wrap up warmly. Summarize key points if appropriate.",
+      "safety": {
+        "risk_level": "none",
+        "categories": [],
+        "signals": [],
+        "response_directives": [],
+        "requires_safety_first_response": false,
+        "disclaimer": "Rule-based conversational signal detection; not a diagnosis or substitute for professional assessment."
+      }
     },
     "coherence_scores": {
-      "topic_coherence": 0.786,
+      "topic_coherence": 0.625,
       "memory_coherence": 0.5,
       "belief_coherence": 1.0,
       "profile_stability": 0.976,
-      "overall": 0.831
+      "overall": 0.783
     }
   }
 ]

@@ -1,133 +1,146 @@
-# Psychological Coherence MCP Server
+# Psychological Coherence MCP
 
-A Model Context Protocol server that implements psychologically-informed, rule-based text generation with coherent conversational state management. Built from the Psychological Coherence Framework concept — distilled into functional, stateful tools that an LLM can orchestrate for persona-driven dialogue.
+A stateful [Model Context Protocol](https://modelcontextprotocol.io/) server that gives language models structured guidance for persona-consistent dialogue. It combines deterministic text analysis, conversational memory, belief tracking, topic state, safety triage, and response-alignment checks without calling an external API.
 
-## What This Does
+> [!IMPORTANT]
+> The safety and psychological signals are rule-based conversational aids. They are not diagnoses and are not substitutes for qualified professional judgment or emergency services.
 
-This MCP server gives an LLM the ability to maintain **psychological coherence** across a conversation by providing tools for:
+## Highlights
 
-- **Persona-driven voice**: Four deeply characterized personas with personality traits, communication styles, formative experiences, voice markers, and emotional triggers
-- **Real-time psychological analysis**: Weighted Big Five personality profiling, emotion detection (valence/arousal model), formality/directness scoring, need detection, trigger identification
-- **Multi-layered memory**: Short-term working memory, long-term storage with relevance-scored recall (TF-overlap + recency decay + importance weighting)
-- **Belief tracking with contradiction detection**: Maintains a belief graph per entity/attribute, detects contradictions when new facts conflict with prior claims, suggests resolution strategies
-- **Coherence scoring**: Multi-dimensional (topic, memory, belief, profile stability) with weighted composite
-- **Topic tracking**: Detects continuations, shifts, and returns with appropriate discourse markers
-- **Dialogue phase awareness**: Automatic phase detection (opening, information gathering, problem solving, rapport building, negotiation, closing)
-- **Humanization**: Disfluency injection (filled pauses, filler words, hesitations, self-repairs), persona voice markers, prosody hints — all calibrated to persona traits and emotional context
-- **Generation constraint building**: Converts psychological analysis into actionable LLM instructions (tone, structure, content, avoidance directives)
-- **Safety-first conversational triage**: Detects explicit self-harm and violence signals, planning, and immediacy; high-risk guidance overrides persona performance (rule-based, non-diagnostic)
-- **Review-first memory extraction**: Suggests preferences, identity facts, projects, and goals without silently storing them
-- **Closed-loop response tracking**: Records the assistant response that was actually delivered and checks basic persona, verbosity, and safety alignment
-- **Portable sessions**: Lists active sessions and exports/imports versioned JSON snapshots so state can survive process restarts
+- Four detailed personas with stable traits, voice markers, and response patterns
+- Weighted emotion, Big Five, formality, directness, need, and trigger analysis
+- Short- and long-term memory with relevance-ranked recall
+- Belief tracking with contradiction detection
+- Topic, dialogue-phase, and multi-dimensional coherence tracking
+- Safety-first handling of explicit self-harm and violence signals
+- Review-first memory extraction—nothing is silently promoted to long-term memory
+- Versioned session export/import with strict validation and bounded state
+- Closed-loop recording and evaluation of the response actually shown to a user
+- Fully local, deterministic analysis with no external model or network dependency
 
-## Tools
+## Quick start
 
-| Tool | Description |
-|------|-------------|
-| `psy_list_personas` | List all available personas with summaries |
-| `psy_get_persona` | Get full persona definition (traits, voice, experiences) |
-| `psy_create_session` | Initialize a dialogue session with a specific persona |
-| `psy_analyze_input` | Full psychological analysis of any text |
-| `psy_generate_response` | **Primary tool** — full pipeline producing generation constraints |
-| `psy_store_memory` | Store a memory (episodic, semantic, procedural, emotional) |
-| `psy_recall` | Relevance-scored memory retrieval |
-| `psy_store_belief` | Record facts with automatic contradiction detection |
-| `psy_build_constraints` | Build generation constraints without full pipeline |
-| `psy_humanize_text` | Apply disfluencies and persona voice to clean text |
-| `psy_get_coherence_state` | Full session coherence report |
-| `psy_assess_safety` | Standalone explicit harm-signal triage with safety-first response guidance |
-| `psy_extract_memories` | Extract reviewable memory candidates without storing them |
-| `psy_record_response` | Record the delivered assistant turn and evaluate basic alignment |
-| `psy_list_sessions` | List active sessions and lifecycle metadata |
-| `psy_export_session` | Export complete state as a versioned JSON snapshot |
-| `psy_import_session` | Validate and restore an exported snapshot |
-| `psy_end_session` | End session with comprehensive summary |
-
-## Personas
-
-- **Amara** (`counselor_amara`): Warm, perceptive counselor. Reflective listening, Socratic questioning, calm authority from genuine understanding.
-- **Kai** (`engineer_kai`): Systems thinker. Precise but patient, finds beauty in mechanisms, values clarity over cleverness.
-- **Vex** (`storyteller_vex`): Mercurial creative. Thinks in narrative arcs, every word chosen for weight, finds meaning where others find noise.
-- **Sol** (`mentor_sol`): Grounded pragmatist. Speaks slowly and means every word. Blunt but never unkind.
-
-Each persona includes Big Five traits, communication style parameters, emotional triggers, response patterns, voice markers (preferred starters, hedges, intensifiers, signature phrases), and formative experiences that shape their worldview.
-
-## Installation
-
-### Requirements
-
-- Python 3.10+
-- `mcp` (MCP Python SDK with FastMCP)
-- `pydantic` v2+
+Requires Python 3.10 or newer.
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/recursive-ai-dev/psych-coherence-mcp.git
+cd psych-coherence-mcp
+python -m venv .venv
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
+pip install -e .
+python -m psych_coherence_mcp
 ```
 
-### Claude Desktop Integration
+The last command starts the MCP server over stdio. Installation also provides a `psych-coherence-mcp` console command.
 
-Add to your `claude_desktop_config.json`:
+### Claude Desktop
+
+Install the package in the Python environment Claude Desktop will use, then add the following entry to its configuration:
 
 ```json
 {
   "mcpServers": {
     "psychological_coherence": {
-      "command": "python",
-      "args": ["/absolute/path/to/server.py"],
+      "command": "/absolute/path/to/python",
+      "args": ["-m", "psych_coherence_mcp"],
       "env": {}
     }
   }
 }
 ```
 
-### Running Standalone
+An editable template is available in [`claude_desktop_config.json`](claude_desktop_config.json). The root-level `server.py` launcher remains as a backward-compatible entry point, but new integrations should use the package module or console command.
 
-```bash
-python server.py
+## Available tools
+
+| Tool | Purpose |
+| --- | --- |
+| `psy_list_personas` | List persona summaries |
+| `psy_get_persona` | Retrieve a complete persona definition |
+| `psy_create_session` | Create state for a persona-driven dialogue |
+| `psy_analyze_input` | Run the complete text-analysis pipeline |
+| `psy_generate_response` | Build the primary generation brief and update session state |
+| `psy_store_memory` | Explicitly store an approved long-term memory |
+| `psy_recall` | Rank and retrieve relevant memories |
+| `psy_store_belief` | Store a fact and detect contradictions |
+| `psy_build_constraints` | Build persona-aware constraints without advancing a turn |
+| `psy_humanize_text` | Add calibrated disfluencies and prosody hints |
+| `psy_get_coherence_state` | Inspect the current coherence state |
+| `psy_assess_safety` | Run standalone explicit harm-signal triage |
+| `psy_extract_memories` | Suggest reviewable memory candidates without storing them |
+| `psy_record_response` | Record the delivered assistant turn and check alignment |
+| `psy_list_sessions` | List active in-memory sessions |
+| `psy_export_session` | Export a versioned JSON snapshot |
+| `psy_import_session` | Validate and restore a snapshot |
+| `psy_end_session` | End a session and return its summary |
+
+## Typical workflow
+
+1. Call `psy_create_session` with one of the persona IDs below.
+2. Pass each user turn to `psy_generate_response`.
+3. Use the returned tone, structure, content, safety, memory, and persona constraints to compose a response. A `safety_first` priority always outranks persona performance.
+4. Optionally pass ordinary responses through `psy_humanize_text`. Do not humanize urgent safety responses.
+5. Call `psy_record_response` with the exact response delivered to the user.
+6. Review `psy_extract_memories` output and explicitly persist approved items with `psy_store_memory` or `psy_store_belief`.
+7. Export the session if it must survive process shutdown.
+
+Sessions are held in memory and are intentionally bounded. Export important sessions before stopping the process.
+
+## Personas
+
+- **Amara** (`counselor_amara`) — warm, perceptive, reflective, and calm
+- **Kai** (`engineer_kai`) — systematic, precise, patient, and evidence-oriented
+- **Vex** (`storyteller_vex`) — lyrical, mercurial, and narrative-driven
+- **Sol** (`mentor_sol`) — grounded, direct, practical, and economical
+
+## Project layout
+
+```text
+.
+├── src/psych_coherence_mcp/
+│   ├── analysis.py       # linguistic, emotion, trait, safety, and memory analysis
+│   ├── coherence.py      # memory relevance, beliefs, topics, and scoring
+│   ├── constants.py      # lexicons, personas, and state limits
+│   ├── generation.py     # generation constraints and humanization
+│   ├── models.py         # internal state models
+│   ├── schemas.py        # validated MCP inputs
+│   ├── server.py         # FastMCP tools and stdio entry point
+│   └── state.py          # session registry and snapshot validation
+├── tests/                # pytest plus integration/adversarial checks
+├── examples/             # runnable local examples
+├── results/              # checked-in experiment fixtures
+└── docs/                 # audit and experiment notes
 ```
 
-This starts the server on stdio transport (the protocol used by Claude Desktop and other MCP clients).
+## Development
 
-### Running Tests
+Install development dependencies and run every quality gate:
 
 ```bash
-python test_server.py
-python test_expanded.py
-python test_adversarial.py
+pip install -e '.[dev]'
+ruff format --check .
+ruff check .
+mypy
+pytest
+python tests/integration_check.py
+python tests/regression_check.py
+python tests/adversarial_check.py
 ```
 
-`test_server.py` covers the original end-to-end workflow, while `test_expanded.py`
-covers safety triage, response recording, memory extraction, snapshot portability,
-and quality-audit regressions.
+The pytest suite includes a real stdio client/server smoke test, so it checks MCP registration and transport in addition to direct Python calls.
 
-## How an LLM Uses This
+## Design notes
 
-The typical workflow:
+All analysis is algorithmic:
 
-1. **`psy_create_session`** — pick a persona, get a session ID
-2. **`psy_generate_response`** — pass the user's text; get back a full generation brief with:
-   - Psychological analysis of the user
-   - Persona-calibrated constraints (tone, structure, content, avoidance)
-   - Recalled memories
-   - Topic transition guidance
-   - Dialogue phase context
-3. **The LLM writes its response** using those constraints. A `safety_first` priority must override normal persona styling.
-4. **`psy_humanize_text`** (optional) — add persona-authentic disfluencies; skip this for urgent safety responses
-5. **`psy_record_response`** — record what was actually delivered so both sides of the dialogue remain in context
-6. **`psy_extract_memories`** then **`psy_store_memory`** / **`psy_store_belief`** — review and persist important facts explicitly
-7. **`psy_export_session`** (optional) — retain state across server restarts
-8. Repeat from step 2
+- emotion detection uses a weighted lexicon, valence/arousal mapping, and basic negation handling;
+- personality estimates use directional lexical evidence with shrinkage toward a neutral prior and conflict-aware confidence;
+- memory relevance combines token overlap, configurable recency decay, importance, and a bounded access bonus;
+- coherence combines topic flow, memory recency, contradiction rate, and profile stability;
+- humanization probabilistically applies persona-calibrated pauses, fillers, hesitations, and self-repairs.
 
-## Architecture
+These heuristics provide transparent, reproducible signals. They do not claim the accuracy of a clinical instrument or a learned psychological model.
 
-The server is self-contained in a single Python file with zero external API dependencies. All analysis is algorithmic:
+## Acknowledgment
 
-- **Emotion detection**: Weighted lexicon (~120 words → 13 emotions) with negation handling, sigmoid-scaled intensity, valence/arousal computation
-- **Big Five profiling**: Directional lexicon scoring (~180 indicator words) with Bayesian shrinkage toward prior, supplemented by linguistic feature heuristics
-- **Memory relevance**: TF-overlap with exponential recency decay (24h half-life), importance weighting, access frequency bonus
-- **Coherence scoring**: Weighted composite of topic consistency, memory accessibility, belief contradiction rate, and profile stability
-- **Disfluency injection**: Probabilistic with persona-trait calibration (neuroticism amplifies pauses, extraversion amplifies filler words) and emotional modulation
-
-## License
-
-Concept by James. MCP implementation follows the Model Context Protocol specification.
+Original Psychological Coherence Framework concept by James.

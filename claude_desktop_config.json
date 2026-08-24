@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "psychological_coherence": {
-      "command": "python",
-      "args": ["/path/to/psychological_coherence_mcp/server.py"],
+      "command": "/absolute/path/to/psych-coherence-mcp/.venv/bin/python",
+      "args": ["-m", "psych_coherence_mcp"],
       "env": {}
     }
   }
