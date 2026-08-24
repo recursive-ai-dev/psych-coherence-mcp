@@ -1,0 +1,55 @@
+"""Regenerate the static baseline responses used by the comparison notes."""
+
+import json
+from pathlib import Path
+
+RESULT_PATH = Path(__file__).resolve().parents[1] / "results" / "baseline_results.json"
+
+BASELINE_RESULTS = [
+    {
+        "user_input": "I've been feeling really overwhelmed lately. My job is demanding too much and I have no time for myself.",
+        "baseline_response": "I'm sorry to hear that you're feeling overwhelmed. It's important to prioritize your well-being. Have you considered talking to your manager about your workload or setting strict boundaries for your personal time?",
+        "mcp_features_lacking": [
+            "No persona context",
+            "No emotional tone adaptation based on psychological analysis",
+            "Generic advice rather than reflective listening",
+        ],
+    },
+    {
+        "user_input": "It's just constant pressure. I'm a software engineer and the deadlines are always unreasonable.",
+        "baseline_response": "Software engineering can indeed be a high-pressure field with strict deadlines. To manage the pressure, you could try breaking tasks into smaller chunks, using time-management techniques like Pomodoro, or asking for help from colleagues.",
+        "mcp_features_lacking": [
+            "Misses the underlying anxiety",
+            "Jumps to problem-solving too quickly",
+            "Lacks warmth and consistent character voice",
+        ],
+    },
+    {
+        "user_input": "I guess I could try to set better boundaries, but I'm afraid my manager will think I'm slacking.",
+        "baseline_response": "It's common to fear that setting boundaries will be perceived negatively. However, clear communication about your capacity often leads to more respect, not less. You could phrase it as a way to ensure the quality of your work remains high.",
+        "mcp_features_lacking": [
+            "Fails to validate the fear before offering perspective",
+            "Tone remains neutral and disconnected",
+            "Does not track the dialogue phase transition to problem-solving effectively",
+        ],
+    },
+    {
+        "user_input": "Thanks. I'll try talking to them tomorrow and see how it goes.",
+        "baseline_response": "You're welcome! Good luck with your conversation tomorrow. Let me know if you need any more advice or help preparing what to say.",
+        "mcp_features_lacking": [
+            "Generic closing",
+            "Does not utilize persona signature phrases",
+            "Lacks psychological depth in concluding the interaction",
+        ],
+    },
+]
+
+
+def main() -> None:
+    RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RESULT_PATH.write_text(json.dumps(BASELINE_RESULTS, indent=2) + "\n", encoding="utf-8")
+    print(f"Wrote {RESULT_PATH}")
+
+
+if __name__ == "__main__":
+    main()
