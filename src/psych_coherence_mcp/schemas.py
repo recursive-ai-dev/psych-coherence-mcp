@@ -204,7 +204,7 @@ class SafetyAssessmentInput(BaseModel):
 class RecordResponseInput(BaseModel):
     """Input for recording and evaluating the assistant's actual response."""
 
-    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
     session_id: SessionId = Field(..., description="Active session ID.")
     generation_id: SessionId = Field(
         ..., description="Generation ID returned by psy_generate_response for this response."
@@ -212,6 +212,13 @@ class RecordResponseInput(BaseModel):
     response_text: str = Field(
         ..., description="The response actually shown to the user.", min_length=1, max_length=10000
     )
+
+    @field_validator("response_text")
+    @classmethod
+    def validate_response_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("response_text must contain non-whitespace characters.")
+        return value
 
 
 class ImportSessionInput(BaseModel):

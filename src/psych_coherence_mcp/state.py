@@ -12,6 +12,8 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from .constants import (
+    MAX_MEMORY_ACCESS_COUNT,
+    MAX_SESSION_TURNS,
     MAX_SNAPSHOT_ITEMS,
     MAX_TOPIC_HISTORY,
     MAX_TOPIC_KEYWORDS,
@@ -38,7 +40,7 @@ class _MemorySnapshot(_SnapshotModel):
     memory_type: Literal["episodic", "semantic", "procedural", "emotional"]
     timestamp: str = Field(min_length=1, max_length=64)
     importance: float = Field(ge=0.0, le=1.0)
-    access_count: int = Field(default=0, ge=0, le=1_000_000_000)
+    access_count: int = Field(default=0, ge=0, le=MAX_MEMORY_ACCESS_COUNT)
     tags: list[str] = Field(default_factory=list, max_length=20)
     decay_rate: float = Field(default=0.0289, ge=0.0, le=1.0)
     associations: list[str] = Field(default_factory=list, max_length=100)
@@ -59,7 +61,7 @@ class _BeliefSnapshot(_SnapshotModel):
     value: Any
     confidence: float = Field(ge=0.0, le=1.0)
     timestamp: str = Field(min_length=1, max_length=64)
-    source_turn: int = Field(ge=0, le=1_000_000_000)
+    source_turn: int = Field(ge=0, le=MAX_SESSION_TURNS)
 
 
 TopicLabel = Annotated[str, Field(max_length=MAX_TOPIC_LABEL_LENGTH)]
@@ -84,7 +86,7 @@ class _TopicSnapshot(_SnapshotModel):
 
 
 class _ResponseSnapshot(_SnapshotModel):
-    turn: int = Field(ge=1, le=1_000_000_000)
+    turn: int = Field(ge=1, le=MAX_SESSION_TURNS)
     generation_id: str = Field(min_length=1, max_length=100, pattern=SESSION_ID_PATTERN)
     user_text: str = Field(default="", max_length=200)
     phase: str = Field(default="opening", max_length=100)
@@ -143,7 +145,8 @@ def _restore_session(
     snapshot: dict[str, Any], session_id: str | None = None, *, repair_topics: bool = False
 ) -> Session:
     """Validate and restore a session from an exported snapshot."""
-    if snapshot.get("snapshot_version") != SNAPSHOT_VERSION:
+    version = snapshot.get("snapshot_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version != SNAPSHOT_VERSION:
         raise ValueError(f"Unsupported snapshot_version; expected {SNAPSHOT_VERSION}.")
 
     data = snapshot.get("session")
@@ -181,17 +184,23 @@ def _restore_session(
     raw_turn_count = data.get("turn_count", 0)
     if isinstance(raw_turn_count, bool) or not isinstance(raw_turn_count, int):
         raise ValueError("Snapshot turn_count must be an integer.")
-    if not 0 <= raw_turn_count <= 1_000_000_000:
+    if not 0 <= raw_turn_count <= MAX_SESSION_TURNS:
         raise ValueError("Snapshot turn_count is outside the supported range.")
 
-    created_at = str(data.get("created_at", iso_utc_now()))
-    updated_at = str(data.get("updated_at", created_at))
+    created_at = data.get("created_at", iso_utc_now())
+    updated_at = data.get("updated_at", created_at)
+    if not isinstance(created_at, str) or not isinstance(updated_at, str):
+        raise ValueError("Snapshot created_at and updated_at must be timestamp strings.")
     parse_timestamp(created_at)
     parse_timestamp(updated_at)
 
     memories: list[MemoryEntry] = []
+    memory_ids: set[str] = set()
     for item in dict_entries("long_term_memories"):
         validated_memory = _MemorySnapshot.model_validate(item)
+        if validated_memory.id in memory_ids:
+            raise ValueError("Snapshot long_term_memories has duplicate memory IDs.")
+        memory_ids.add(validated_memory.id)
         parse_timestamp(validated_memory.timestamp)
         memories.append(MemoryEntry(**validated_memory.model_dump()))
 
@@ -214,6 +223,8 @@ def _restore_session(
             raise ValueError(f"Snapshot belief_graph exceeds {MAX_SNAPSHOT_ITEMS} beliefs.")
         for attribute, raw_belief in attributes.items():
             validated_belief = _BeliefSnapshot.model_validate(raw_belief)
+            if validated_belief.source_turn > raw_turn_count:
+                raise ValueError("Snapshot belief source_turn exceeds the session turn_count.")
             if validated_belief.entity != entity or validated_belief.attribute != attribute:
                 raise ValueError(
                     "Snapshot belief_graph keys must match each belief's entity and attribute."
@@ -239,6 +250,10 @@ def _restore_session(
                 f"{data.get('session_id')}:{created_at}:{item.get('turn')}",
             ).hex
         response = _ResponseSnapshot.model_validate(migrated)
+        if (
+            response.assistant_text or response.assistant_response_hash
+        ) and not response.assistant_recorded_at:
+            raise ValueError("Snapshot recorded response is missing assistant_recorded_at.")
         parse_timestamp(response.timestamp)
         if response.assistant_recorded_at:
             parse_timestamp(response.assistant_recorded_at)

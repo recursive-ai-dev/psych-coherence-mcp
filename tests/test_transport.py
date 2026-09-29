@@ -1,6 +1,7 @@
 """End-to-end smoke test for the real MCP stdio transport."""
 
 import copy
+import hashlib
 import json
 import sys
 
@@ -197,3 +198,56 @@ async def test_audit_fixes_over_stdio() -> None:
             "psy_generate_response", session_id="restored", user_text="What city do I live in?"
         )
         assert brief["relevant_beliefs"][0]["value"] == "UniqueCity123"
+
+
+async def test_deep_stabilization_fixes_over_stdio() -> None:
+    parameters = StdioServerParameters(command=sys.executable, args=["-m", "psych_coherence_mcp"])
+    async with (
+        stdio_client(parameters) as (read_stream, write_stream),
+        ClientSession(read_stream, write_stream) as session,
+    ):
+        await session.initialize()
+
+        async def call(name: str, **params) -> dict:
+            result = await session.call_tool(name, arguments={"params": params})
+            assert not result.isError, result.content
+            assert isinstance(result.content[0], TextContent)
+            return json.loads(result.content[0].text)
+
+        await call("psy_create_session", persona_id="engineer_kai", session_id="deep-wire")
+        for content in ("unrelated", "alpha\nbeta"):
+            await call("psy_store_memory", session_id="deep-wire", content=content)
+        recalled = await call("psy_recall", session_id="deep-wire", query="beta", max_results=1)
+        assert recalled["results"][0]["content"]["text"] == "alpha\nbeta"
+
+        brief = await call("psy_generate_response", session_id="deep-wire", user_text="beta")
+        text = "    Preserve this indentation.\n"
+        recorded = await call(
+            "psy_record_response",
+            session_id="deep-wire",
+            generation_id=brief["generation_id"],
+            response_text=text,
+        )
+        assert recorded["status"] == "recorded"
+        snapshot = await call("psy_export_session", session_id="deep-wire")
+        entry = snapshot["session"]["response_history"][0]
+        assert entry["assistant_text"] == text
+        assert entry["assistant_response_hash"] == hashlib.sha256(text.encode()).hexdigest()
+        malformed = copy.deepcopy(snapshot)
+        del malformed["session"]["response_history"][0]["assistant_recorded_at"]
+        assert (await call("psy_import_session", snapshot=malformed, overwrite=True))[
+            "status"
+        ] == "invalid_snapshot"
+        assert (await call("psy_export_session", session_id="deep-wire"))["session"] == snapshot[
+            "session"
+        ]
+
+        await call("psy_import_session", snapshot=snapshot, new_session_id="restored-wire")
+        for response, expected in ((text, "already_recorded"), (text.strip(), "response_conflict")):
+            result = await call(
+                "psy_record_response",
+                session_id="restored-wire",
+                generation_id=brief["generation_id"],
+                response_text=response,
+            )
+            assert result["status"] == expected

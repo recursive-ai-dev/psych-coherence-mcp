@@ -47,10 +47,23 @@ def blend_profiles(
     )
 
 
+def _memory_content_words(value: Any) -> set[str]:
+    """Tokenize JSON content without turning escaped whitespace into word characters."""
+    if isinstance(value, dict):
+        return {
+            word
+            for key, item in value.items()
+            for part in (key, item)
+            for word in _memory_content_words(part)
+        }
+    if isinstance(value, list):
+        return {word for item in value for word in _memory_content_words(item)}
+    return set(tokenize(value if isinstance(value, str) else json.dumps(value)))
+
+
 def compute_memory_relevance(query_words: list[str], memory: MemoryEntry) -> float:
     """Compute relevance of a memory entry to a query using TF overlap + recency decay."""
-    content_text = json.dumps(memory.content, ensure_ascii=False).lower()
-    content_words = set(tokenize(content_text))
+    content_words = _memory_content_words(memory.content)
     tag_words = set(t.lower() for t in memory.tags)
 
     query_set = set(query_words)

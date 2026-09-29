@@ -35,7 +35,9 @@ from .constants import (
     MAX_ACTIVE_SESSIONS,
     MAX_BELIEFS_PER_SESSION,
     MAX_MEMORIES_PER_SESSION,
+    MAX_MEMORY_ACCESS_COUNT,
     MAX_SESSION_HISTORY,
+    MAX_SESSION_TURNS,
     PERSONAS,
 )
 from .generation import build_generation_constraints, humanize_text
@@ -323,6 +325,13 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
     """
     session = await _get_session(params.session_id)
     async with session.session_lock:
+        if session.turn_count >= MAX_SESSION_TURNS:
+            return json.dumps(
+                {
+                    "status": "limit_reached",
+                    "error": "The session turn limit has been reached. Export and start a new session.",
+                }
+            )
         persona = PERSONAS[session.persona_id]
         generation_id = uuid.uuid4().hex
         session.turn_count += 1
@@ -368,7 +377,7 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
         ranked_memories.sort(key=lambda item: item[0], reverse=True)
         relevant_memories = []
         for relevance, mem in ranked_memories[:5]:
-            mem.access_count += 1
+            mem.access_count = min(mem.access_count + 1, MAX_MEMORY_ACCESS_COUNT)
             relevant_memories.append(
                 {
                     "memory_id": mem.id,
@@ -545,7 +554,7 @@ async def psy_recall(params: RecallInput) -> str:
         selected = ranked[: params.max_results]
         scored = []
         for relevance, mem in selected:
-            mem.access_count += 1
+            mem.access_count = min(mem.access_count + 1, MAX_MEMORY_ACCESS_COUNT)
             scored.append(
                 {
                     "memory_id": mem.id,

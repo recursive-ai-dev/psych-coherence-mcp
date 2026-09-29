@@ -132,6 +132,8 @@ response returns `already_recorded` without adding another message. A different
 response for an already recorded generation returns `response_conflict` and
 preserves the original. Unknown IDs and IDs evicted from the 1,000-entry history
 return `generation_not_found`. IDs and response hashes survive export/import.
+Response text retains its leading and trailing whitespace; retries compare the
+exact text, while whitespace-only responses are rejected.
 
 Version 1 snapshots remain supported. Legacy response entries without generation
 IDs receive deterministic IDs on import, available in the next export. Missing
@@ -148,6 +150,14 @@ newest entries while preserving the current topic's keyword association. The
 result reports `topic_state_repaired`; export the repaired session to save it.
 Normal imports strictly validate the topic limits. Both creation and import
 enforce the active-session cap; explicit replacement at capacity is allowed.
+Imports also reject duplicate memory IDs, beliefs sourced from future turns,
+and response text or hashes without a recording timestamp. Session timestamps
+must be strings, and the snapshot version must be an integer.
+
+The session turn limit is 1,000,000,000. Further generation returns `limit_reached`
+without advancing the turn; existing responses can still be recorded and the
+session can still be exported. Memory access counts stop at 1,000,000,000 while
+recall remains available. These bounds keep exported state importable.
 
 Generation briefs include up to five `relevant_beliefs`, ranked by entity and
 attribute matches, with current values, confidence, and source turn/timestamp.
