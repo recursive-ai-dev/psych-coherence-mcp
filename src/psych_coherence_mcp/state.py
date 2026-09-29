@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .constants import (
     MAX_MEMORY_ACCESS_COUNT,
+    MAX_SESSION_HISTORY,
     MAX_SESSION_TURNS,
     MAX_SNAPSHOT_ITEMS,
     MAX_TOPIC_HISTORY,
@@ -130,6 +131,8 @@ def _session_snapshot(session: Session) -> dict[str, Any]:
                 for entity, attributes in session.belief_graph.items()
             },
             "contradiction_log": session.contradiction_log,
+            "contradiction_count": session.total_contradictions,
+            "contradiction_count_complete": session.contradiction_count_complete,
             "topic_state": asdict(session.topic_state),
             "dialogue_phase": session.dialogue_phase,
             "user_profile": asdict(session.user_profile),
@@ -286,6 +289,26 @@ def _restore_session(
     ):
         raise ValueError("Snapshot pronoun_map must map strings to strings.")
 
+    contradictions = dict_entries("contradiction_log")
+    contradiction_count = data.get("contradiction_count", len(contradictions))
+    if (
+        isinstance(contradiction_count, bool)
+        or not isinstance(contradiction_count, int)
+        or contradiction_count < len(contradictions)
+    ):
+        raise ValueError(
+            "Snapshot contradiction_count must be an integer >= the retained log size."
+        )
+    # Older snapshots at the retention cap may already have discarded events.
+    # Never infer a complete lifetime count from that truncated history.
+    count_complete = data.get("contradiction_count_complete", False)
+    if not isinstance(count_complete, bool):
+        raise ValueError("Snapshot contradiction_count_complete must be a boolean.")
+    if "contradiction_count" not in data:
+        count_complete = len(contradictions) < MAX_SESSION_HISTORY and data.get(
+            "contradiction_count_complete", True
+        )
+
     return Session(
         session_id=sid.strip(),
         persona_id=persona_id,
@@ -294,7 +317,9 @@ def _restore_session(
         short_term_memory=deque(dict_entries("short_term_memory"), maxlen=30),
         long_term_memories=memories,
         belief_graph=beliefs,
-        contradiction_log=dict_entries("contradiction_log"),
+        contradiction_log=contradictions,
+        contradiction_count=contradiction_count,
+        contradiction_count_complete=count_complete,
         topic_state=TopicState(**topic.model_dump()),
         dialogue_phase=phase,
         user_profile=user_profile,

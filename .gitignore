@@ -10,6 +10,8 @@ __pycache__/
 .venv/
 venv/
 env/
+docs/
+tests/
 
 # Packaging output
 build/

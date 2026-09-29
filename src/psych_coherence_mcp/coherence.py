@@ -117,6 +117,7 @@ def detect_contradiction(
                 "turns_apart": session.turn_count - existing.source_turn,
                 "timestamp": iso_utc_now(),
             }
+            session.contradiction_count = session.total_contradictions + 1
             _append_bounded(session.contradiction_log, contradiction)
             return contradiction
 
@@ -308,7 +309,11 @@ def compute_coherence_score(session: Session) -> dict[str, float]:
 
     # Contradiction coherence: fewer contradictions = better
     if session.turn_count > 0:
-        contradiction_rate = len(session.contradiction_log) / session.turn_count
+        # The score already bottoms out at high rates; clamp before converting
+        # potentially large imported integer counters to floating point.
+        contradiction_rate = (
+            min(session.total_contradictions, session.turn_count) / session.turn_count
+        )
         scores["belief_coherence"] = round(max(0.0, 1.0 - contradiction_rate * 2.0), 3)
     else:
         scores["belief_coherence"] = 1.0

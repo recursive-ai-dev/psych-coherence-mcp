@@ -85,7 +85,52 @@ Install the package in the Python environment Claude Desktop will use, then add 
 }
 ```
 
-An editable template is available in [`claude_desktop_config.json`](claude_desktop_config.json). The root-level `server.py` launcher remains as a backward-compatible entry point, but new integrations should use the package module or console command.
+A configuration using the installed `psych-coherence-mcp` command is available in
+[`claude_desktop_config.json`](claude_desktop_config.json). It works when that command
+is on the desktop client's `PATH`. If the client does not inherit your activated
+virtual environment, use the absolute Python path shown above. The root-level
+`server.py` launcher remains as a backward-compatible entry point, but new
+integrations should use the package module or console command.
+
+### Deployment
+
+The supported deployment is a local stdio subprocess launched by an MCP client.
+No API keys, environment variables, database, model download, writable data
+directory, or network service is required at runtime. Dependencies must be
+available from a package index during installation, or supplied as local wheels.
+The server runs from any working directory after installation. Its stdout is
+reserved for MCP messages; diagnostics go to stderr.
+
+For a non-editable production installation from this checkout:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install .
+.venv/bin/psych-coherence-mcp
+```
+
+On Windows, use `.venv\Scripts\python.exe` and
+`.venv\Scripts\psych-coherence-mcp.exe`. Configure the MCP client to launch the
+installed command or the virtual environment's Python with
+`-m psych_coherence_mcp`. A process waiting silently for input is normal; MCP
+initialization and `ping` are the readiness check. Closing stdin shuts it down.
+There is no HTTP listener or HTTP health route in this deployment.
+
+To build distributable artifacts, install `.[dev]` and run `python -m build`.
+This creates an sdist and a wheel built from that sdist in `dist/`. Install the
+wheel with `python -m pip install dist/psych_coherence_mcp-1.0.0-py3-none-any.whl`,
+then run `python -m pip check`. The release CI installs the wheel and exercises all
+18 tools through the module, console, and compatibility launchers from unrelated
+working directories. See [`RELEASE_READINESS.md`](RELEASE_READINESS.md) for actual
+verification results and platform coverage.
+
+State belongs to a single process and is lost on shutdown unless the client
+exports snapshots and restores them after restart. Run one server per trusted
+client; the stdio service does not provide shared hosting, authentication, or
+cross-process session persistence. End sessions when finished: the default cap is
+1,000 active sessions, each with at most 1,000 memories and 1,000 beliefs. A model
+runtime is only needed by the calling application if it wants to compose replies
+from the server's generation briefs.
 
 ## Available tools
 
@@ -168,6 +213,17 @@ The response safety check requires both an immediate-safety question and concret
 human-support guidance, using phrase boundaries and basic negation checks. Its
 `assessment_type`, `safety_elements`, and `limitations` fields describe a limited
 rule-based heuristic; a passing result does not establish clinical safety.
+
+Contradiction totals and belief coherence use a persisted lifetime counter even
+after detailed log entries are evicted. `total_contradictions` includes evicted
+events; `retained_contradictions` reports the remaining log size. Version 1
+snapshots without a counter are still accepted and initialize it from the log.
+If a legacy log is at the 1,000-entry cap, the server cannot recover earlier
+events: it sets `contradiction_count_complete` to `false`, preserves that flag on
+export, and reports it in briefs, coherence state, and session summaries. In that
+case the count is a lower bound and belief coherence can overestimate lifetime
+consistency. New sessions track the complete count. Keep migration metadata when
+saving snapshots; older server versions do not preserve these new counter fields.
 
 ## Personas
 

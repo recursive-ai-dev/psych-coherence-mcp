@@ -1,0 +1,59 @@
+name: Release checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ['3.10', '3.11', '3.12', '3.13']
+        include:
+          - os: windows-latest
+            python: '3.13'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install development and build dependencies
+        run: python -m pip install '.[dev]'
+      - name: Formatting
+        run: python -m ruff format --check .
+      - name: Lint
+        run: python -m ruff check .
+      - name: Types
+        run: python -m mypy
+      - name: Build sdist and wheel from sdist
+        run: python -m build
+      - name: Install the built wheel
+        run: python -c "import glob, subprocess, sys; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', '--no-deps', *glob.glob('dist/*.whl')])"
+      - name: Dependency consistency
+        run: python -m pip check
+      - name: Tests including all tools and launchers over stdio
+        run: python -m pytest -q
+      - name: Integration
+        run: python tests/integration_check.py
+      - name: Capability regressions
+        run: python tests/regression_check.py
+      - name: Adversarial checks
+        run: python tests/adversarial_check.py
+      - name: Import without warnings
+        run: python -W error -c "import psych_coherence_mcp"
+      - name: Retain verified distributions
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/*

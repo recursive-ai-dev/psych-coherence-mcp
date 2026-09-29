@@ -413,6 +413,7 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
             "relevant_beliefs": recall_beliefs(session, params.user_text),
             "recent_conversation": recent_turns,
             "coherence_scores": coherence,
+            "contradiction_count_complete": session.contradiction_count_complete,
             "humanization_config": {
                 "enabled": params.enable_humanization
                 and constraints.get("priority") != "safety_first",
@@ -703,6 +704,7 @@ async def psy_get_coherence_state(params: SessionIdInput) -> str:
                 "turn_count": session.turn_count,
                 "dialogue_phase": session.dialogue_phase,
                 "coherence_scores": coherence,
+                "contradiction_count_complete": session.contradiction_count_complete,
                 "topic_state": {
                     "current_topic": session.topic_state.current_topic,
                     "topic_history": session.topic_state.topic_history[-10:],
@@ -717,7 +719,9 @@ async def psy_get_coherence_state(params: SessionIdInput) -> str:
                 "belief_stats": {
                     "total_entities": len(session.belief_graph),
                     "total_beliefs": sum(len(attrs) for attrs in session.belief_graph.values()),
-                    "total_contradictions": len(session.contradiction_log),
+                    "total_contradictions": session.total_contradictions,
+                    "retained_contradictions": len(session.contradiction_log),
+                    "contradiction_count_complete": session.contradiction_count_complete,
                 },
                 "contradiction_log": session.contradiction_log[-5:],
                 "contradictions_detected": session.contradiction_log[-5:],
@@ -864,7 +868,9 @@ async def psy_end_session(params: SessionIdInput) -> str:
             "topic_coverage": session.topic_state.topic_history,
             "total_memories_stored": len(session.long_term_memories),
             "total_beliefs_tracked": sum(len(attrs) for attrs in session.belief_graph.values()),
-            "total_contradictions": len(session.contradiction_log),
+            "total_contradictions": session.total_contradictions,
+            "retained_contradictions": len(session.contradiction_log),
+            "contradiction_count_complete": session.contradiction_count_complete,
             "contradictions": session.contradiction_log,
             "status": "ended",
         }

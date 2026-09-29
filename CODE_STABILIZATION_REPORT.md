@@ -67,10 +67,16 @@ Deeper pass verification:
 
 ## Deferred Risks
 
+**Release hardening update:** The scoring defect below is now resolved with a
+persisted lifetime counter and an explicit completeness flag for legacy capped
+snapshots. See [`RELEASE_READINESS.md`](RELEASE_READINESS.md) for the implementation,
+migration behavior, and current verification. The following describes the
+historical finding.
+
 **Contradiction scoring after history eviction** — `coherence.py::compute_coherence_score` divides the retained contradiction-log length by the lifetime turn count. Once the 1,000-entry log starts evicting records, belief coherence can improve despite continuing contradictions; reported total contradictions also reflects only retained entries. A reduced-cap public-tool reproduction produced nine actual contradictions but reported two and a score of 0.6.
 
 Changing this safely requires choosing lifetime or recent-window semantics. Lifetime scoring needs a persisted cumulative count plus a migration policy for snapshots that have already lost records; recent-window scoring changes the metric's meaning. Neither is inferable from existing snapshots. Containment: track cumulative contradictions externally, or export and rotate sessions before the contradiction log reaches 1,000 entries; do not interpret the current score as a lifetime rate after eviction.
 
 ## What I need from you
 
-No input is needed for the applied fixes. Resolving the deferred scoring issue requires a choice between lifetime and recent-window scoring, including how historical snapshots should be treated.
+No input is needed. Release hardening preserves lifetime scoring and explicitly marks incomplete legacy counts; see the release readiness report.

@@ -123,3 +123,10 @@ class Session:
     session_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_accessed: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    contradiction_count: int = 0
+    contradiction_count_complete: bool = True
+
+    @property
+    def total_contradictions(self) -> int:
+        """Include retained entries in sessions constructed through the Python API."""
+        return max(self.contradiction_count, len(self.contradiction_log))
