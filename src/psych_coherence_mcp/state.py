@@ -4,19 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import re
+import uuid
 from collections import defaultdict, deque
 from dataclasses import asdict
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .constants import (
     MAX_SNAPSHOT_ITEMS,
+    MAX_TOPIC_HISTORY,
+    MAX_TOPIC_KEYWORDS,
+    MAX_TOPIC_LABEL_LENGTH,
     PERSONAS,
     SESSION_ID_PATTERN,
     SNAPSHOT_VERSION,
 )
 from .models import BeliefEntry, MemoryEntry, PersonalityProfile, Session, TopicState
+from .topics import repair_topic_state
 from .utils import iso_utc_now, parse_timestamp
 
 SESSIONS: dict[str, Session] = {}
@@ -57,12 +62,40 @@ class _BeliefSnapshot(_SnapshotModel):
     source_turn: int = Field(ge=0, le=1_000_000_000)
 
 
-class _TopicSnapshot(_SnapshotModel):
-    current_topic: str = Field(default="", max_length=500)
-    topic_history: list[str] = Field(default_factory=list, max_length=MAX_SNAPSHOT_ITEMS)
+TopicLabel = Annotated[str, Field(max_length=MAX_TOPIC_LABEL_LENGTH)]
+
+
+class _LegacyTopicSnapshot(_SnapshotModel):
+    current_topic: str = ""
+    topic_history: list[str] = Field(default_factory=list)
     topic_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     transition_type: Literal["opening", "continuation", "shift", "return"] = "opening"
     topic_keywords: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class _TopicSnapshot(_SnapshotModel):
+    current_topic: TopicLabel = ""
+    topic_history: list[TopicLabel] = Field(default_factory=list, max_length=MAX_TOPIC_HISTORY)
+    topic_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    transition_type: Literal["opening", "continuation", "shift", "return"] = "opening"
+    topic_keywords: dict[
+        TopicLabel, Annotated[list[TopicLabel], Field(max_length=MAX_TOPIC_KEYWORDS)]
+    ] = Field(default_factory=dict, max_length=MAX_TOPIC_HISTORY)
+
+
+class _ResponseSnapshot(_SnapshotModel):
+    turn: int = Field(ge=1, le=1_000_000_000)
+    generation_id: str = Field(min_length=1, max_length=100, pattern=SESSION_ID_PATTERN)
+    user_text: str = Field(default="", max_length=200)
+    phase: str = Field(default="opening", max_length=100)
+    primary_emotion: str = Field(default="neutral", max_length=100)
+    # Legacy snapshots without risk data must never silently disable safety checks.
+    risk_level: Literal["none", "low", "moderate", "high", "imminent", "unknown"] = "unknown"
+    coherence: float = Field(default=0.0, ge=0.0, le=1.0)
+    timestamp: str = Field(min_length=1, max_length=64)
+    assistant_text: str = Field(default="", max_length=500)
+    assistant_recorded_at: str = Field(default="", max_length=64)
+    assistant_response_hash: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
 
 async def _get_session(session_id: str) -> Session:
@@ -106,7 +139,9 @@ def _session_snapshot(session: Session) -> dict[str, Any]:
     }
 
 
-def _restore_session(snapshot: dict[str, Any], session_id: str | None = None) -> Session:
+def _restore_session(
+    snapshot: dict[str, Any], session_id: str | None = None, *, repair_topics: bool = False
+) -> Session:
     """Validate and restore a session from an exported snapshot."""
     if snapshot.get("snapshot_version") != SNAPSHOT_VERSION:
         raise ValueError(f"Unsupported snapshot_version; expected {SNAPSHOT_VERSION}.")
@@ -186,12 +221,36 @@ def _restore_session(snapshot: dict[str, Any], session_id: str | None = None) ->
             parse_timestamp(validated_belief.timestamp)
             beliefs[str(entity)][str(attribute)] = BeliefEntry(**validated_belief.model_dump())
 
-    topic = _TopicSnapshot.model_validate(mapping("topic_state"))
-    if len(topic.topic_keywords) > MAX_SNAPSHOT_ITEMS or any(
-        not isinstance(keywords, list) or len(keywords) > 100
-        for keywords in topic.topic_keywords.values()
-    ):
-        raise ValueError("Snapshot topic_keywords is invalid or too large.")
+    raw_topic = mapping("topic_state")
+    if repair_topics:
+        legacy_topic = _LegacyTopicSnapshot.model_validate(raw_topic)
+        raw_topic = asdict(repair_topic_state(TopicState(**legacy_topic.model_dump())))
+    topic = _TopicSnapshot.model_validate(raw_topic)
+
+    response_history = []
+    generation_ids: set[str] = set()
+    turns: set[int] = set()
+    for item in dict_entries("response_history"):
+        migrated = dict(item)
+        if "generation_id" not in migrated:
+            # Deterministic identifiers keep repeated imports of legacy snapshots stable.
+            migrated["generation_id"] = uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{data.get('session_id')}:{created_at}:{item.get('turn')}",
+            ).hex
+        response = _ResponseSnapshot.model_validate(migrated)
+        parse_timestamp(response.timestamp)
+        if response.assistant_recorded_at:
+            parse_timestamp(response.assistant_recorded_at)
+        if response.turn > raw_turn_count or response.turn in turns:
+            raise ValueError("Snapshot response history has an invalid or duplicate turn.")
+        if response.generation_id in generation_ids:
+            raise ValueError("Snapshot response history has duplicate generation IDs.")
+        generation_ids.add(response.generation_id)
+        turns.add(response.turn)
+        response_history.append(response.model_dump(exclude_unset=True))
+        # Preserve the explicit conservative migration in future exports.
+        response_history[-1]["risk_level"] = response.risk_level
 
     phase = data.get("dialogue_phase", "opening")
     valid_phases = {
@@ -227,6 +286,6 @@ def _restore_session(snapshot: dict[str, Any], session_id: str | None = None) ->
         user_profile_history=profile_history,
         entity_registry=entity_registry,
         pronoun_map=pronoun_map,
-        response_history=dict_entries("response_history"),
+        response_history=response_history,
         updated_at=updated_at,
     )

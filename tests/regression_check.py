@@ -86,6 +86,7 @@ async def main() -> None:
     recorded = json.loads(
         await psy_record_response(
             RecordResponseInput(
+                generation_id=brief["generation_id"],
                 session_id="expanded-test",
                 response_text=(
                     "Are you in immediate danger, and are you safe right now? "

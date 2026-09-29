@@ -9,8 +9,15 @@ import re
 from typing import Any, TypeVar
 
 from .analysis import tokenize
-from .constants import DISCOURSE_MARKERS, MAX_SESSION_HISTORY
+from .constants import (
+    DISCOURSE_MARKERS,
+    MAX_RELEVANT_BELIEFS,
+    MAX_SESSION_HISTORY,
+    MAX_TOPIC_HISTORY,
+    MAX_TOPIC_KEYWORDS,
+)
 from .models import MemoryEntry, PersonalityProfile, Session
+from .topics import bound_topic_label, prune_topic_keywords
 from .utils import iso_utc_now, parse_timestamp, utc_now
 
 T = TypeVar("T")
@@ -108,21 +115,26 @@ def update_topic_state(session: Session, topics: list[str]) -> dict[str, Any]:
     if not topics:
         return {"transition_type": "continuation", "marker": ""}
 
+    topics = [bound_topic_label(topic) for topic in topics[:MAX_TOPIC_KEYWORDS]]
     new_topic = topics[0]  # Primary topic
     state = session.topic_state
     previous = state.current_topic
 
     # Store keyword associations
+    state.topic_keywords.pop(new_topic, None)
     state.topic_keywords[new_topic] = topics
 
     if not previous:
         state.current_topic = new_topic
-        _append_bounded(state.topic_history, new_topic)
+        state.topic_history.append(new_topic)
+        del state.topic_history[:-MAX_TOPIC_HISTORY]
+        prune_topic_keywords(state)
         state.transition_type = "opening"
         state.topic_confidence = 0.7
         return {"transition_type": "opening", "marker": "", "topic": new_topic}
 
     if new_topic == previous or any(kw == previous or kw in previous.split() for kw in topics[:3]):
+        prune_topic_keywords(state)
         state.transition_type = "continuation"
         state.topic_confidence = min(1.0, state.topic_confidence + 0.05)
         marker = random.choice(DISCOURSE_MARKERS["continuation"])
@@ -130,7 +142,9 @@ def update_topic_state(session: Session, topics: list[str]) -> dict[str, Any]:
 
     if new_topic in state.topic_history:
         state.current_topic = new_topic
-        _append_bounded(state.topic_history, new_topic)
+        state.topic_history.append(new_topic)
+        del state.topic_history[:-MAX_TOPIC_HISTORY]
+        prune_topic_keywords(state)
         state.transition_type = "return"
         state.topic_confidence = 0.6
         marker = random.choice(DISCOURSE_MARKERS["return"]).format(topic=new_topic)
@@ -143,7 +157,9 @@ def update_topic_state(session: Session, topics: list[str]) -> dict[str, Any]:
 
     # New topic
     state.current_topic = new_topic
-    _append_bounded(state.topic_history, new_topic)
+    state.topic_history.append(new_topic)
+    del state.topic_history[:-MAX_TOPIC_HISTORY]
+    prune_topic_keywords(state)
     state.transition_type = "shift"
     state.topic_confidence = 0.5
     marker = random.choice(DISCOURSE_MARKERS["shift"])
@@ -153,6 +169,35 @@ def update_topic_state(session: Session, topics: list[str]) -> dict[str, Any]:
         "topic": new_topic,
         "shifted_from": previous,
     }
+
+
+def recall_beliefs(session: Session, query: str) -> list[dict[str, Any]]:
+    """Retrieve current facts by entity/attribute overlap, with first-person aliases."""
+    words = set(tokenize(query.replace("_", " ")))
+    if words & {"i", "me", "my", "mine"}:
+        words.add("user")
+    ranked = []
+    for entity, attributes in session.belief_graph.items():
+        entity_words = set(tokenize(entity.replace("_", " ")))
+        entity_match = bool(words & entity_words)
+        for attribute, belief in attributes.items():
+            attribute_words = set(tokenize(attribute.replace("_", " ")))
+            attribute_matches = len(words & attribute_words)
+            if not attribute_matches and not entity_match:
+                continue
+            score = attribute_matches * 2 + int(entity_match)
+            ranked.append((score, belief))
+    ranked.sort(key=lambda item: (item[0], item[1].source_turn, item[1].confidence), reverse=True)
+    return [
+        {
+            "entity": belief.entity,
+            "attribute": belief.attribute,
+            "value": belief.value,
+            "confidence": belief.confidence,
+            "provenance": {"source_turn": belief.source_turn, "timestamp": belief.timestamp},
+        }
+        for _, belief in ranked[:MAX_RELEVANT_BELIEFS]
+    ]
 
 
 def update_dialogue_phase(session: Session, analysis: dict[str, Any], user_text: str) -> str:

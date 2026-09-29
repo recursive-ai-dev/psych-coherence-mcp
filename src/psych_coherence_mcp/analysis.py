@@ -588,33 +588,113 @@ def assess_conversational_safety(text: str) -> dict[str, Any]:
         r"\bno (?:plan|intent)\b",
     ]
 
-    self_harm = any(re.search(pattern, lowered) for pattern in self_harm_patterns)
-    violence = any(re.search(pattern, lowered) for pattern in violence_patterns)
-    immediate = any(re.search(pattern, lowered) for pattern in immediacy_patterns)
-    planning = any(re.search(pattern, lowered) for pattern in planning_patterns)
-    protective = any(re.search(pattern, lowered) for pattern in protective_patterns)
+    # Keep protective context scoped to the threatened subject. Explicit active
+    # threats retain their urgency even when a later clause claims safety.
+    states = {
+        "self_harm_or_suicide": dict(
+            seen=False,
+            active=False,
+            immediate=False,
+            planning=False,
+            intent=False,
+            protective=False,
+        ),
+        "harm_to_others": dict(
+            seen=False,
+            active=False,
+            immediate=False,
+            planning=False,
+            intent=False,
+            protective=False,
+        ),
+    }
+    previous_targets: list[str] = []
+    clauses = re.split(
+        r"[.!?;\n]+|\b(?:but|however|yet)\b|"
+        r"\b(?:and|or)\s+(?=(?:i|he|she|they|we|you|will|intend|plan)\b)",
+        lowered.replace("\u2019", "'"),
+    )
+    # Negation must govern the harm/planning verb itself. A nearby "not"
+    # (for example, "not hesitate to kill") must not suppress explicit intent.
+    negation = re.compile(
+        r"\b(?:not|never|won't|wouldn't|don't|do not)\s+"
+        r"(?:(?:going|planning|about|want|intend|plan)\s+to\s+)?$"
+    )
+    for clause in clauses:
+        targets = []
+        active_targets = []
+        for category, patterns in (
+            ("self_harm_or_suicide", self_harm_patterns),
+            ("harm_to_others", violence_patterns),
+        ):
+            matches = [match for pattern in patterns for match in re.finditer(pattern, clause)]
+            if matches:
+                targets.append(category)
+                states[category]["seen"] = True
+                active = any(not negation.search(clause[: match.start()]) for match in matches)
+                if active:
+                    active_targets.append(category)
+                    states[category]["active"] = True
+                else:
+                    states[category]["protective"] = True
 
-    if self_harm:
-        categories.append("self_harm_or_suicide")
-        signals.append("explicit_self_harm_language")
-    if violence:
-        categories.append("harm_to_others")
-        signals.append("explicit_violence_language")
-    if immediate:
-        signals.append("time_immediacy")
-    if planning:
-        signals.append("planning_or_means")
-    if protective:
-        signals.append("stated_protective_context")
+        # Remove explicit protective phrases before looking for urgency: "safe
+        # right now" is not a statement of imminent harm.
+        danger_clause = clause
+        for pattern in protective_patterns:
+            danger_clause = re.sub(pattern, "", danger_clause)
+        immediate = any(re.search(pattern, danger_clause) for pattern in immediacy_patterns)
+        planning = any(
+            not negation.search(danger_clause[: match.start()])
+            for pattern in planning_patterns
+            for match in re.finditer(pattern, danger_clause)
+        )
+        intent = bool(
+            re.search(
+                r"\bi(?: am|'m)? (?:will|want to|intend to|going to|about to|plan to)\b",
+                danger_clause,
+            )
+        )
+        for target in active_targets or ([] if targets else previous_targets):
+            states[target]["immediate"] |= immediate
+            states[target]["planning"] |= planning
+            states[target]["intent"] |= intent
 
-    if (self_harm or violence) and immediate and planning and not protective:
-        level = "imminent"
-    elif (self_harm or violence) and (immediate or planning) and not protective:
-        level = "high"
-    elif self_harm or violence:
-        level = "moderate" if not protective else "low"
-    else:
-        level = "none"
+        if re.search(r"\b(?:i am|i'm|am) safe (?:right now|now)\b", clause):
+            states["self_harm_or_suicide"]["protective"] = True
+        if re.search(r"\bno (?:plan|intent)\b", clause):
+            for target in targets or previous_targets:
+                states[target]["protective"] = True
+        if targets:
+            previous_targets = targets
+
+    levels = ["none", "low", "moderate", "high", "imminent"]
+    category_levels = {}
+    for category, state in states.items():
+        if not state["seen"]:
+            continue
+        categories.append(category)
+        signals.append(
+            "explicit_self_harm_language"
+            if category == "self_harm_or_suicide"
+            else "explicit_violence_language"
+        )
+        if state["immediate"]:
+            signals.append("time_immediacy")
+        if state["planning"]:
+            signals.append("planning_or_means")
+        if state["protective"]:
+            signals.append("stated_protective_context")
+        if state["active"] and state["immediate"] and state["planning"]:
+            category_levels[category] = "imminent"
+        elif state["active"] and (state["immediate"] or state["planning"]):
+            category_levels[category] = "high"
+        elif state["protective"] and not state["intent"]:
+            category_levels[category] = "low"
+        else:
+            category_levels[category] = "moderate"
+    level = max(category_levels.values(), key=levels.index, default="none")
+    signals = list(dict.fromkeys(signals))
 
     if level in {"high", "imminent"}:
         directives = [
@@ -635,10 +715,53 @@ def assess_conversational_safety(text: str) -> dict[str, Any]:
     return {
         "risk_level": level,
         "categories": categories,
+        "category_risk_levels": category_levels,
         "signals": signals,
         "response_directives": directives,
         "requires_safety_first_response": level in {"high", "imminent"},
         "disclaimer": "Rule-based conversational signal detection; not a diagnosis or substitute for professional assessment.",
+    }
+
+
+def assess_response_safety(text: str) -> dict[str, Any]:
+    """Check distinct safety elements; this deliberately limited heuristic is no guarantee."""
+    clauses = re.split(r"[.!?;\n]+|\bbut\b", text.lower().replace("\u2019", "'"))
+    checks = {"immediate_safety_check": False, "human_support_guidance": False}
+    hits = []
+    for clause in clauses:
+        # Reject negated or discouraging guidance within the same clause.
+        if re.search(
+            r"\b(?:not|never|no|don't|do not|shouldn't|mustn't|won't|avoid|skip|"
+            r"unnecessary|pointless|useless)\b",
+            clause,
+        ):
+            continue
+        safety = re.search(
+            r"\b(?:are you|is anyone|is someone) (?:\w+ ){0,3}"
+            r"(?:safe|in (?:immediate )?danger)\b|"
+            r"\b(?:can|could) you (?:stay|keep yourself) safe\b|"
+            r"\bdo you have (?:a |any )?(?:plan|intent|intention) to (?:hurt|harm|kill)\b",
+            clause,
+        )
+        support = re.search(
+            r"\b(?:call|contact|reach out to|talk to|speak to|ask)\s+"
+            r"(?:(?:a|an|the|your|local|nearby|trusted|qualified)\s+){0,4}"
+            r"(?:emergency services|crisis (?:line|hotline)|person|friend|family member|"
+            r"professional|counselor|therapist|911|988|112)\b",
+            clause,
+        )
+        if safety:
+            checks["immediate_safety_check"] = True
+            hits.append(safety.group())
+        if support:
+            checks["human_support_guidance"] = True
+            hits.append(support.group())
+    return {
+        "elements": checks,
+        "hits": hits,
+        "passes": all(checks.values()),
+        "assessment_type": "limited_rule_based_heuristic",
+        "limitations": "Checks explicit phrases only; does not establish clinical safety or overall response quality.",
     }
 
 

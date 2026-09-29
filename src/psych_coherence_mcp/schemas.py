@@ -206,6 +206,9 @@ class RecordResponseInput(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     session_id: SessionId = Field(..., description="Active session ID.")
+    generation_id: SessionId = Field(
+        ..., description="Generation ID returned by psy_generate_response for this response."
+    )
     response_text: str = Field(
         ..., description="The response actually shown to the user.", min_length=1, max_length=10000
     )
@@ -221,6 +224,10 @@ class ImportSessionInput(BaseModel):
     new_session_id: SessionId | None = None
     overwrite: bool = Field(
         default=False, description="Replace an active session with the same ID."
+    )
+    repair_topics: bool = Field(
+        default=False,
+        description="Repair legacy oversized topic labels and retention, discarding oldest topics.",
     )
 
 

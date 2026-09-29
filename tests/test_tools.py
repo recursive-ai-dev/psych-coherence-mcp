@@ -60,6 +60,7 @@ async def test_complete_session_lifecycle() -> None:
     recorded = json.loads(
         await psy_record_response(
             RecordResponseInput(
+                generation_id=brief["generation_id"],
                 session_id="integration",
                 response_text="Let's break this down into a small sequence of verifiable steps.",
             )
@@ -179,6 +180,7 @@ async def test_safety_brief_and_response_recording() -> None:
     assessment = json.loads(
         await psy_record_response(
             RecordResponseInput(
+                generation_id=brief["generation_id"],
                 session_id="integration",
                 response_text=(
                     "Are you in immediate danger, and are you safe? Call emergency services "

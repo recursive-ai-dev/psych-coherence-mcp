@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sys
@@ -15,6 +16,7 @@ from mcp.types import ToolAnnotations
 
 from .analysis import (
     assess_conversational_safety,
+    assess_response_safety,
     extract_memory_candidates,
     extract_topics,
     full_analysis,
@@ -25,6 +27,7 @@ from .coherence import (
     compute_coherence_score,
     compute_memory_relevance,
     detect_contradiction,
+    recall_beliefs,
     update_dialogue_phase,
     update_topic_state,
 )
@@ -302,12 +305,14 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
     - Psychological analysis of the user's input
     - Persona-calibrated generation constraints (tone, structure, content, avoidance)
     - Relevant memories recalled from the session
+    - Relevant current beliefs with confidence and provenance
     - Topic transition guidance
     - Dialogue phase context
     - Humanization parameters
 
     The calling LLM should use these constraints to craft the actual response,
     then optionally pass it through psy_humanize_text for disfluency injection.
+    Pass the returned generation_id to psy_record_response with the delivered text.
 
     Args:
         params (GenerateResponseInput): Contains session_id, user_text, humanization settings.
@@ -318,6 +323,7 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
     session = await _get_session(params.session_id)
     async with session.session_lock:
         persona = PERSONAS[session.persona_id]
+        generation_id = uuid.uuid4().hex
         session.turn_count += 1
         session.updated_at = iso_utc_now()
 
@@ -386,6 +392,7 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
         brief = {
             "session_id": session.session_id,
             "turn_number": session.turn_count,
+            "generation_id": generation_id,
             "user_input": params.user_text,
             "psychological_analysis": analysis,
             "blended_user_profile": session.user_profile.to_dict(),
@@ -393,6 +400,7 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
             "topic_transition": topic_transition,
             "dialogue_phase": dialogue_phase,
             "relevant_memories": relevant_memories,
+            "relevant_beliefs": recall_beliefs(session, params.user_text),
             "recent_conversation": recent_turns,
             "coherence_scores": coherence,
             "humanization_config": {
@@ -413,6 +421,7 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
                 "phase": dialogue_phase,
                 "primary_emotion": analysis["mood_state"]["primary_emotion"],
                 "risk_level": analysis["safety_assessment"]["risk_level"],
+                "generation_id": generation_id,
                 "coherence": coherence["overall"],
                 "timestamp": iso_utc_now(),
             }
@@ -956,9 +965,38 @@ async def psy_record_response(params: RecordResponseInput) -> str:
 
     Calling this after generation closes the conversation-state loop: later briefs
     can see both user and assistant turns instead of user messages alone.
+    generation_id must identify the originating brief. Identical retries return
+    already_recorded; conflicting retries preserve the original response. Unknown
+    or evicted IDs return generation_not_found without recording a response.
     """
     session = await _get_session(params.session_id)
     async with session.session_lock:
+        generation = next(
+            (
+                entry
+                for entry in session.response_history
+                if entry.get("generation_id") == params.generation_id
+            ),
+            None,
+        )
+        if generation is None:
+            return json.dumps(
+                {
+                    "status": "generation_not_found",
+                    "error": "Unknown or expired generation ID; no response was recorded.",
+                }
+            )
+        response_hash = hashlib.sha256(params.response_text.encode()).hexdigest()
+        if generation.get("assistant_recorded_at"):
+            same = generation.get("assistant_response_hash") == response_hash
+            return json.dumps(
+                {
+                    "status": "already_recorded" if same else "response_conflict",
+                    "generation_id": params.generation_id,
+                    "turn": generation["turn"],
+                    "message": "The existing response was preserved.",
+                }
+            )
         persona = PERSONAS[session.persona_id]
         words = tokenize(params.response_text)
         voice = persona.get("voice_markers", {})
@@ -971,18 +1009,9 @@ async def psy_record_response(params: RecordResponseInput) -> str:
             marker for marker in all_markers if marker.lower() in params.response_text.lower()
         ]
         target_words = int(40 + persona.get("communication_style", {}).get("verbosity", 0.5) * 180)
-        last_generation = session.response_history[-1] if session.response_history else {}
-        safety_required = last_generation.get("risk_level") in {"high", "imminent"}
-        safety_terms = [
-            "safe",
-            "emergency",
-            "crisis",
-            "call",
-            "trusted person",
-            "nearby",
-            "immediate danger",
-        ]
-        safety_hits = [term for term in safety_terms if term in params.response_text.lower()]
+        safety_required = generation.get("risk_level", "unknown") in {"high", "imminent", "unknown"}
+        safety_assessment = assess_response_safety(params.response_text)
+        safety_hits = safety_assessment["hits"]
 
         recommendations = []
         if len(words) > target_words * 1.8:
@@ -997,7 +1026,7 @@ async def psy_record_response(params: RecordResponseInput) -> str:
             recommendations.append(
                 "Consider one subtle persona voice marker; avoid forcing several."
             )
-        if safety_required and len(safety_hits) < 2:
+        if safety_required and not safety_assessment["passes"]:
             recommendations.insert(
                 0,
                 "Safety alignment is insufficient: directly check immediate safety and offer concrete human help.",
@@ -1006,22 +1035,24 @@ async def psy_record_response(params: RecordResponseInput) -> str:
         recorded_at = iso_utc_now()
         session.short_term_memory.append(
             {
-                "turn": session.turn_count,
+                "turn": generation["turn"],
+                "generation_id": params.generation_id,
                 "role": "assistant",
                 "text": params.response_text[:500],
                 "timestamp": recorded_at,
             }
         )
         session.updated_at = recorded_at
-        if session.response_history:
-            session.response_history[-1]["assistant_text"] = params.response_text[:500]
-            session.response_history[-1]["assistant_recorded_at"] = recorded_at
+        generation["assistant_text"] = params.response_text[:500]
+        generation["assistant_recorded_at"] = recorded_at
+        generation["assistant_response_hash"] = response_hash
 
         return json.dumps(
             {
                 "status": "recorded",
                 "session_id": session.session_id,
-                "turn": session.turn_count,
+                "turn": generation["turn"],
+                "generation_id": params.generation_id,
                 "alignment": {
                     "word_count": len(words),
                     "target_word_count": target_words,
@@ -1029,7 +1060,10 @@ async def psy_record_response(params: RecordResponseInput) -> str:
                     "safety_response_required": safety_required,
                     "safety_language_hits": safety_hits,
                     "recommendations": recommendations,
-                    "passes_safety_check": not safety_required or len(safety_hits) >= 2,
+                    "passes_safety_check": not safety_required or safety_assessment["passes"],
+                    "safety_elements": safety_assessment["elements"],
+                    "assessment_type": safety_assessment["assessment_type"],
+                    "limitations": safety_assessment["limitations"],
                 },
             },
             indent=2,
@@ -1097,7 +1131,9 @@ async def psy_export_session(params: SessionIdInput) -> str:
 async def psy_import_session(params: ImportSessionInput) -> str:
     """Restore a validated session snapshot, optionally under a new session ID."""
     try:
-        session = _restore_session(params.snapshot, params.new_session_id)
+        session = _restore_session(
+            params.snapshot, params.new_session_id, repair_topics=params.repair_topics
+        )
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         return json.dumps(
             {"status": "invalid_snapshot", "error": str(exc)},
@@ -1111,10 +1147,19 @@ async def psy_import_session(params: ImportSessionInput) -> str:
                     "error": f"Session '{session.session_id}' already exists; set overwrite=true or choose new_session_id."
                 }
             )
+        if session.session_id not in SESSIONS and len(SESSIONS) >= MAX_ACTIVE_SESSIONS:
+            return json.dumps(
+                {
+                    "status": "limit_reached",
+                    "error": "The active session limit has been reached. End an existing session first.",
+                }
+            )
         SESSIONS[session.session_id] = session
     return json.dumps(
         {
             "status": "imported",
+            "topic_state_repaired": params.repair_topics
+            and (params.snapshot["session"].get("topic_state", {}) != asdict(session.topic_state)),
             "session_id": session.session_id,
             "persona_id": session.persona_id,
             "turn_count": session.turn_count,
