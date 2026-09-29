@@ -49,7 +49,7 @@ def blend_profiles(
 
 def compute_memory_relevance(query_words: list[str], memory: MemoryEntry) -> float:
     """Compute relevance of a memory entry to a query using TF overlap + recency decay."""
-    content_text = json.dumps(memory.content).lower()
+    content_text = json.dumps(memory.content, ensure_ascii=False).lower()
     content_words = set(tokenize(content_text))
     tag_words = set(t.lower() for t in memory.tags)
 
@@ -113,6 +113,7 @@ def detect_contradiction(
 def update_topic_state(session: Session, topics: list[str]) -> dict[str, Any]:
     """Update topic tracking and return transition information."""
     if not topics:
+        session.topic_state.transition_type = "continuation"
         return {"transition_type": "continuation", "marker": ""}
 
     topics = [bound_topic_label(topic) for topic in topics[:MAX_TOPIC_KEYWORDS]]

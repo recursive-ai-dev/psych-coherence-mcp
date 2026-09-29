@@ -272,6 +272,7 @@ async def psy_analyze_input(params: AnalyzeInputModel) -> str:
                     PersonalityProfile(**asdict(session.user_profile))
                 )
                 _trim_history(session.user_profile_history)
+                session.updated_at = iso_utc_now()
 
                 result["session_profile_updated"] = True
                 result["blended_user_profile"] = session.user_profile.to_dict()
@@ -404,7 +405,8 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
             "recent_conversation": recent_turns,
             "coherence_scores": coherence,
             "humanization_config": {
-                "enabled": params.enable_humanization,
+                "enabled": params.enable_humanization
+                and constraints.get("priority") != "safety_first",
                 "disfluency_level": params.disfluency_level,
                 "persona_voice_markers": persona.get("voice_markers", {}),
             },
@@ -483,6 +485,7 @@ async def psy_store_memory(params: StoreMemoryInput) -> str:
             associations=extract_topics(params.content)[:4],
         )
         session.long_term_memories.append(entry)
+        session.updated_at = entry.timestamp
 
         return json.dumps(
             {
@@ -556,6 +559,9 @@ async def psy_recall(params: RecallInput) -> str:
                 }
             )
 
+        if selected:
+            session.updated_at = iso_utc_now()
+
         return json.dumps(
             {
                 "query": params.query,
@@ -625,6 +631,7 @@ async def psy_store_belief(params: StoreBeliefInput) -> str:
             source_turn=session.turn_count,
         )
         session.belief_graph[params.entity][params.attribute] = entry
+        session.updated_at = entry.timestamp
 
         result: dict[str, Any] = {
             "entity": params.entity,
