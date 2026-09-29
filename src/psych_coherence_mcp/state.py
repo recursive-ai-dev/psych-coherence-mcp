@@ -101,6 +101,10 @@ class _ResponseSnapshot(_SnapshotModel):
     assistant_response_hash: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
 
+class _SafetyContextSnapshot(_SnapshotModel):
+    risk_level: Literal["none", "high", "imminent", "unknown"]
+
+
 async def _get_session(session_id: str) -> Session:
     """Return an active session or raise a user-facing lookup error."""
     async with SESSIONS_LOCK:
@@ -140,6 +144,7 @@ def _session_snapshot(session: Session) -> dict[str, Any]:
             "entity_registry": session.entity_registry,
             "pronoun_map": session.pronoun_map,
             "response_history": session.response_history,
+            "safety_context": session.safety_context,
         },
     }
 
@@ -270,6 +275,22 @@ def _restore_session(
         # Preserve the explicit conservative migration in future exports.
         response_history[-1]["risk_level"] = response.risk_level
 
+    if "safety_context" in data:
+        safety_context = _SafetyContextSnapshot.model_validate(
+            {"risk_level": data["safety_context"]}
+        ).risk_level
+    else:
+        # Legacy histories did not record resolution. Carry any retained urgent
+        # or unknown risk until the client explicitly resolves it. An incomplete
+        # history cannot establish the absence of earlier risk.
+        risk_order = ("none", "unknown", "high", "imminent")
+        retained_risks = [
+            entry["risk_level"] for entry in response_history if entry["risk_level"] in risk_order
+        ]
+        safety_context = max(retained_risks, key=risk_order.index, default="none")
+        if safety_context == "none" and len(response_history) < raw_turn_count:
+            safety_context = "unknown"
+
     phase = data.get("dialogue_phase", "opening")
     valid_phases = {
         "opening",
@@ -327,5 +348,6 @@ def _restore_session(
         entity_registry=entity_registry,
         pronoun_map=pronoun_map,
         response_history=response_history,
+        safety_context=safety_context,
         updated_at=updated_at,
     )

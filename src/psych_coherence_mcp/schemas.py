@@ -73,6 +73,15 @@ class GenerateResponseInput(BaseModel):
     enable_humanization: bool = Field(
         default=True, description="Apply disfluencies and persona voice markers."
     )
+    safety_context_resolved: bool = Field(
+        default=False,
+        strict=True,
+        description=(
+            "Clear previously carried safety context only after the calling application "
+            "has verified that concern is resolved. Current user_text is still assessed "
+            "and fresh urgent signals retain safety priority."
+        ),
+    )
     disfluency_level: float = Field(
         default=0.3, description="Disfluency intensity 0.0-1.0.", ge=0.0, le=1.0
     )

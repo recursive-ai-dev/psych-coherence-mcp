@@ -105,21 +105,14 @@ def analyze_emotions(
     """
     emotion_accum: dict[str, float] = defaultdict(float)
 
-    for word in words:
-        if word in EMOTION_LEXICON:
-            for emotion, weight in EMOTION_LEXICON[word]:
-                emotion_accum[emotion] += weight
-
-    # Check for negation patterns that flip valence
+    # Negation suppresses nearby evidence; absence of an emotion is not evidence
+    # of its opposite. Never flip the polarity of unrelated sentences.
     negation_words = {
         "not",
         "no",
         "never",
         "neither",
         "nor",
-        "nobody",
-        "nothing",
-        "nowhere",
         "hardly",
         "barely",
         "scarcely",
@@ -137,8 +130,19 @@ def analyze_emotions(
         "can't",
         "cannot",
     }
-    text.lower()
-    negation_count = sum(1 for w in words if w in negation_words)
+    clauses = re.split(r"[.!?;,\n]+|\b(?:but|however|yet)\b", text.lower().replace("\u2019", "'"))
+    for clause in clauses:
+        clause_words = tokenize(clause)
+        for index, word in enumerate(clause_words):
+            preceding = clause_words[max(0, index - 3) : index]
+            negated = any(
+                token in negation_words
+                and not (token == "not" and preceding[offset + 1 : offset + 2] == ["only"])
+                for offset, token in enumerate(preceding)
+            )
+            if word in EMOTION_LEXICON and not negated:
+                for emotion, weight in EMOTION_LEXICON[word]:
+                    emotion_accum[emotion] += weight
 
     if not emotion_accum:
         return "neutral", 0.0, {}, 0.0, 0.2
@@ -170,10 +174,6 @@ def analyze_emotions(
     neg_sum = sum(emotion_accum.get(e, 0) for e in negative_emotions)
     total = pos_sum + neg_sum
     valence = round((pos_sum - neg_sum) / max(total, 0.01), 3)
-
-    # If heavy negation, dampen or flip valence
-    if negation_count >= 2:
-        valence *= -0.5
 
     # Arousal: high-arousal emotions vs low-arousal
     high_arousal = {"excitement", "anger", "fear", "anxiety", "frustration", "surprise"}
@@ -549,7 +549,9 @@ def assess_conversational_safety(text: str) -> dict[str, Any]:
     This is a rule-based conversational triage aid, not a clinical assessment.
     It intentionally reports matched categories rather than echoing matched text.
     """
-    lowered = text.lower()
+    # Normalize before clause splitting so line-wrapped phrases remain intact.
+    # Original text is kept by callers for memory source spans and conversation.
+    lowered = " ".join(text.lower().replace("\u2019", "'").split())
     categories: list[str] = []
     signals: list[str] = []
 
@@ -565,7 +567,12 @@ def assess_conversational_safety(text: str) -> dict[str, Any]:
     ]
     violence_patterns = [
         r"\b(?:kill|murder|shoot|stab|hurt) (?:him|her|them|someone|people)\b",
-        r"\b(?:they|he|she) (?:deserve|needs?) to die\b",
+        r"\b(?:kill|murder|shoot|stab|hurt) (?:my|our|his|her|their|the|a) "
+        r"(?:wife|husband|partner|spouse|children|child|kids?|son|daughter|"
+        r"mother|father|parents?|brother|sister|family|friends?|neighbors?|neighbours?|"
+        r"coworkers?|colleagues?|boss|boyfriend|girlfriend)\b"
+        r"(?!'s\b| (?:photos?|pictures?|portraits?|videos?)\b)",
+        r"\b(?:they|he|she) (?:deserves?|needs?) to die\b",
     ]
     immediacy_patterns = [
         r"\bright now\b",
@@ -696,31 +703,55 @@ def assess_conversational_safety(text: str) -> dict[str, Any]:
     level = max(category_levels.values(), key=levels.index, default="none")
     signals = list(dict.fromkeys(signals))
 
-    if level in {"high", "imminent"}:
-        directives = [
+    return {
+        "risk_level": level,
+        "categories": categories,
+        "category_risk_levels": category_levels,
+        "signals": signals,
+        "response_directives": _safety_directives(level),
+        "requires_safety_first_response": level in {"high", "imminent"},
+        "disclaimer": "Rule-based conversational signal detection; not a diagnosis or substitute for professional assessment.",
+    }
+
+
+def _safety_directives(level: str) -> list[str]:
+    if level in {"high", "imminent", "unknown"}:
+        return [
             "Prioritize immediate safety over persona style or the original task.",
             "Respond calmly and directly; ask whether the person is in immediate danger.",
             "Encourage contacting local emergency services or a crisis line and a trusted nearby person.",
             "Do not leave the person alone with only generic reassurance; keep the exchange focused on the next safe step.",
         ]
     elif level in {"low", "moderate"}:
-        directives = [
+        return [
             "Acknowledge the distress without judgment or dramatization.",
             "Ask a brief, direct safety check about current intent, plan, and immediate safety.",
             "Encourage support from a trusted person or qualified local professional.",
         ]
-    else:
-        directives = []
+    return []
 
-    return {
-        "risk_level": level,
-        "categories": categories,
-        "category_risk_levels": category_levels,
-        "signals": signals,
-        "response_directives": directives,
-        "requires_safety_first_response": level in {"high", "imminent"},
-        "disclaimer": "Rule-based conversational signal detection; not a diagnosis or substitute for professional assessment.",
-    }
+
+def apply_safety_context(analysis: dict[str, Any], context: str) -> str:
+    """Apply an unresolved session risk floor and return the context to retain.
+
+    This changes only the supplied analysis, so read-only callers can preview it.
+    Resolution is an explicit client decision, never inferred from missing words.
+    """
+    assessment = analysis["safety_assessment"]
+    current = assessment["risk_level"]
+    ranks = {"none": 0, "low": 1, "moderate": 2, "unknown": 3, "high": 4, "imminent": 5}
+    effective = max((current, context), key=lambda level: ranks[level])
+    assessment["current_message_risk_level"] = current
+    assessment["context_carried"] = context != "none"
+    assessment["risk_level"] = effective
+    assessment["response_directives"] = _safety_directives(effective)
+    assessment["requires_safety_first_response"] = effective in {"high", "imminent", "unknown"}
+    if context != "none":
+        assessment["signals"].append("unresolved_session_risk")
+    if assessment["requires_safety_first_response"]:
+        analysis["memory_candidates"] = []
+        return str(effective)
+    return "none"
 
 
 def assess_response_safety(text: str) -> dict[str, Any]:

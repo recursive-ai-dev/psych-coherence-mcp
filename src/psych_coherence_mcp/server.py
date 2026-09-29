@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from .analysis import (
+    apply_safety_context,
     assess_conversational_safety,
     assess_response_safety,
     extract_memory_candidates,
@@ -263,6 +264,7 @@ async def psy_analyze_input(params: AnalyzeInputModel) -> str:
         try:
             session = await _get_session(params.session_id)
             async with session.session_lock:
+                session.safety_context = apply_safety_context(result, session.safety_context)
                 new_profile = PersonalityProfile(
                     **{k: v for k, v in result["personality_profile"].items()}
                 )
@@ -339,6 +341,9 @@ async def psy_generate_response(params: GenerateResponseInput) -> str:
 
         # Step 1: Analyze user input
         analysis = full_analysis(params.user_text)
+        session.safety_context = apply_safety_context(
+            analysis, "none" if params.safety_context_resolved else session.safety_context
+        )
 
         # Step 2: Update running user profile
         new_profile = PersonalityProfile(
@@ -703,6 +708,7 @@ async def psy_get_coherence_state(params: SessionIdInput) -> str:
                 "persona_id": session.persona_id,
                 "turn_count": session.turn_count,
                 "dialogue_phase": session.dialogue_phase,
+                "safety_context": session.safety_context,
                 "coherence_scores": coherence,
                 "contradiction_count_complete": session.contradiction_count_complete,
                 "topic_state": {
@@ -915,6 +921,7 @@ async def psy_build_constraints(params: BuildConstraintsInput) -> str:
     async with session.session_lock:
         persona = PERSONAS[session.persona_id]
         analysis = full_analysis(params.user_text)
+        apply_safety_context(analysis, session.safety_context)
         constraints = build_generation_constraints(analysis, persona, session)
         constraints["psychological_analysis_summary"] = {
             "primary_emotion": analysis["mood_state"]["primary_emotion"],
@@ -967,7 +974,14 @@ async def psy_extract_memories(params: AnalyzeInputModel) -> str:
     Candidates are never stored automatically. Review them and explicitly call
     psy_store_memory, which avoids silently retaining sensitive user information.
     """
-    candidates = extract_memory_candidates(params.text)
+    if params.session_id:
+        session = await _get_session(params.session_id)
+        async with session.session_lock:
+            analysis = full_analysis(params.text)
+            apply_safety_context(analysis, session.safety_context)
+            candidates = analysis["memory_candidates"]
+    else:
+        candidates = extract_memory_candidates(params.text)
     return json.dumps(
         {"candidates": candidates, "count": len(candidates), "stored": False}, indent=2
     )

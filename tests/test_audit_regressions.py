@@ -32,9 +32,11 @@ async def create(sid="audit"):
     await server.psy_create_session(CreateSessionInput(persona_id="engineer_kai", session_id=sid))
 
 
-async def generate(text="ordinary project", sid="audit"):
+async def generate(text="ordinary project", sid="audit", **kwargs):
     return json.loads(
-        await server.psy_generate_response(GenerateResponseInput(session_id=sid, user_text=text))
+        await server.psy_generate_response(
+            GenerateResponseInput(session_id=sid, user_text=text, **kwargs)
+        )
     )
 
 
@@ -198,7 +200,8 @@ async def test_legacy_topic_repair_is_explicit_and_preserves_input():
 async def test_delayed_responses_retries_and_conflicts():
     await create()
     first = await generate("I will hurt them tonight. I have a plan. I am safe now.")
-    second = await generate()
+    # A different risk context now requires explicit resolution by the client.
+    second = await generate(safety_context_resolved=True)
     assert first["generation_constraints"]["priority"] == "safety_first"
     response2 = await record(second["generation_id"])
     response1 = await record(first["generation_id"], "This unsafe design is a callback problem.")

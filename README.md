@@ -180,6 +180,30 @@ return `generation_not_found`. IDs and response hashes survive export/import.
 Response text retains its leading and trailing whitespace; retries compare the
 exact text, while whitespace-only responses are rejected.
 
+Urgent safety context now persists across session turns. A short follow-up, a
+topic change, or a recorded assistant reply does not clear it. Generation and
+session-linked analysis retain the highest unresolved `high`, `imminent`, or
+`unknown` context; generation, constraint previews, and session-linked memory
+extraction apply it to their guidance. While it remains active, generation
+disables humanization, suppresses memory candidates, and records the effective
+risk with each generation ID for later response checks. Standalone safety
+assessment remains stateless. Constraint previews do not change session state.
+
+After the calling application has verified that the earlier concern is resolved,
+it can pass `safety_context_resolved: true` to `psy_generate_response`. This clears
+only the prior context: fresh urgent signals in the same message still take
+priority. The flag must be a JSON boolean. Resolution does not change the safety
+requirements of replies to earlier generation IDs. Context has no automatic
+timeout. Session-aware assessments expose `current_message_risk_level` and
+`context_carried` to distinguish the current text from the effective `risk_level`.
+
+Snapshots and coherence-state inspection expose `safety_context`. Version 1
+snapshots without this field conservatively recover any retained urgent or
+unknown risk; an incomplete history with no retained urgent signal becomes
+`unknown`. Clients can explicitly resolve that uncertainty through the same flag.
+Malformed context values reject import before replacing a session. Preserve this
+field when saving snapshots; older versions do not preserve it.
+
 Version 1 snapshots remain supported. Legacy response entries without generation
 IDs receive deterministic IDs on import, available in the next export. Missing
 risk levels become `unknown`, which requires safety checks when recording a

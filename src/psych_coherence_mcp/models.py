@@ -125,6 +125,7 @@ class Session:
     last_accessed: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     contradiction_count: int = 0
     contradiction_count_complete: bool = True
+    safety_context: str = "none"
 
     @property
     def total_contradictions(self) -> int:

@@ -219,22 +219,25 @@ def update_dialogue_phase(session: Session, analysis: dict[str, Any], user_text:
     """Determine current dialogue phase from accumulated context."""
     mood = analysis.get("mood_state", {})
     needs = mood.get("detected_needs", [])
-    text_lower = user_text.lower()
+    text_lower = user_text.lower().replace("\u2019", "'")
 
-    # Check for closing signals
-    closing_signals = [
-        "bye",
-        "goodbye",
-        "thanks",
-        "thank you",
-        "that's all",
-        "gotta go",
-        "see you",
-        "later",
-    ]
-    if any(
-        re.search(r"(?<!\w)" + re.escape(sig) + r"(?!\w)", text_lower) for sig in closing_signals
-    ):
+    # A farewell must occupy a conversational clause. Courtesy before a new
+    # question/request and temporal uses of "later" are not closing signals.
+    farewell = (
+        r"(?:ok(?:ay)?\s+)?(?:bye(?: bye)?|goodbye|thanks(?: a lot| so much)?|"
+        r"thank you(?: very much| so much| for [^?]+)?|that's all(?: for now)?|"
+        r"gotta go|(?:i )?have to go|see you(?: later| soon| tomorrow)?|later)"
+    )
+    continuing_request = re.search(
+        r"\?|\b(?:what|how|why|when|where|explain|show me|tell me|help me|please)\b|"
+        r"\b(?:can|could|would|will) you\b|\bi (?:need|want)\b|"
+        r"(?:^|[.!;,]\s*)(?:write|create|draft|generate|summarize|list|fix|help)\b",
+        text_lower,
+    )
+    farewell_clause = any(
+        re.fullmatch(farewell, clause.strip()) for clause in re.split(r"[.!;,\n]+", text_lower)
+    )
+    if farewell_clause and not continuing_request:
         session.dialogue_phase = "closing"
         return "closing"
 

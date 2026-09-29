@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import sysconfig
 from datetime import timedelta
 from pathlib import Path
 
@@ -19,9 +20,8 @@ async def test_all_tools_from_unrelated_working_directory(launcher, tmp_path):
     args = ["-m", "psych_coherence_mcp"]
     if launcher == "console":
         command = str(
-            Path(sys.executable).with_name(
-                "psych-coherence-mcp" + (".exe" if os.name == "nt" else "")
-            )
+            Path(sysconfig.get_path("scripts"))
+            / ("psych-coherence-mcp" + (".exe" if os.name == "nt" else ""))
         )
         args = []
     elif launcher == "legacy":
